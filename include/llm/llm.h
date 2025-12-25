@@ -1,0 +1,167 @@
+#ifndef LLM_H
+#define LLM_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Opaque client handle
+typedef struct llm_client llm_client_t;
+
+// Timeout configuration
+typedef struct {
+    long connect_timeout_ms;
+    long overall_timeout_ms;
+    long read_idle_timeout_ms;  // for streaming
+} llm_timeout_t;
+
+// Limits configuration
+typedef struct {
+    size_t max_response_bytes;
+    size_t max_line_bytes;  // for SSE
+    size_t max_tool_args_bytes_per_call;
+} llm_limits_t;
+
+// Model identifier
+typedef struct {
+    const char* name;
+} llm_model_t;
+
+// Finish reason enum
+typedef enum {
+    LLM_FINISH_REASON_STOP,
+    LLM_FINISH_REASON_LENGTH,
+    LLM_FINISH_REASON_TOOL_CALLS,
+    LLM_FINISH_REASON_CONTENT_FILTER,
+    LLM_FINISH_REASON_UNKNOWN,
+} llm_finish_reason_t;
+
+// Message role
+typedef enum {
+    LLM_ROLE_SYSTEM,
+    LLM_ROLE_USER,
+    LLM_ROLE_ASSISTANT,
+    LLM_ROLE_TOOL,
+} llm_role_t;
+
+// Message structure (span-based)
+typedef struct {
+    llm_role_t role;
+    const char* content;  // optional, may be NULL
+    size_t content_len;
+    // For tool calls
+    const char* tool_call_id;  // optional
+    size_t tool_call_id_len;
+    const char* name;  // optional (for tool role)
+    size_t name_len;
+} llm_message_t;
+
+// Tool call (span-based)
+typedef struct {
+    const char* id;
+    size_t id_len;
+    const char* name;
+    size_t name_len;
+    const char* arguments;  // JSON string
+    size_t arguments_len;
+} llm_tool_call_t;
+
+// Chat completion result (non-stream)
+typedef struct {
+    llm_finish_reason_t finish_reason;
+    const char* content;  // may be NULL
+    size_t content_len;
+    const char* reasoning_content;  // may be NULL
+    size_t reasoning_content_len;
+    llm_tool_call_t* tool_calls;  // array
+    size_t tool_calls_count;
+    void* _internal;  // Internal buffer for spans
+} llm_chat_result_t;
+
+// Tool call delta (streaming partial)
+typedef struct {
+    size_t index;
+    const char* id;  // optional, may be NULL
+    size_t id_len;
+    const char* name;  // optional
+    size_t name_len;
+    const char* arguments_fragment;  // optional
+    size_t arguments_fragment_len;
+} llm_tool_call_delta_t;
+
+// Chat chunk delta (streaming)
+typedef struct {
+    const char* content_delta;  // optional
+    size_t content_delta_len;
+    const char* reasoning_delta;  // optional
+    size_t reasoning_delta_len;
+    llm_tool_call_delta_t* tool_call_deltas;  // array
+    size_t tool_call_deltas_count;
+    llm_finish_reason_t finish_reason;  // may be UNKNOWN
+} llm_chat_chunk_delta_t;
+
+// Streaming callbacks
+typedef struct {
+    void* user_data;
+    void (*on_content_delta)(void* user_data, const char* delta, size_t len);
+    void (*on_reasoning_delta)(void* user_data, const char* delta, size_t len);
+    void (*on_tool_args_fragment)(void* user_data, size_t tool_index, const char* fragment, size_t len);
+    void (*on_finish_reason)(void* user_data, llm_finish_reason_t reason);
+} llm_stream_callbacks_t;
+
+// Client creation and destruction
+llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
+                                const llm_limits_t* limits);
+void llm_client_destroy(llm_client_t* client);
+
+// Health check
+bool llm_health(llm_client_t* client);
+
+// Models list (simple string array)
+char** llm_models_list(llm_client_t* client, size_t* count);
+void llm_models_list_free(char** models, size_t count);
+
+// Properties (server info)
+// Returns JSON span (caller can parse)
+bool llm_props_get(llm_client_t* client, const char** json, size_t* len);
+
+// Completions (non-stream)
+// Returns array of text spans
+bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len,
+                     const char* params_json,  // optional JSON string
+                     const char*** texts, size_t* count);
+void llm_completions_free(const char** texts, size_t count);
+
+// Chat non-stream
+bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+              const char* params_json,           // optional
+              const char* tooling_json,          // optional
+              const char* response_format_json,  // optional
+              llm_chat_result_t* result);
+void llm_chat_result_free(llm_chat_result_t* result);
+
+// Chat stream
+bool llm_chat_stream(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                     const char* params_json, const char* tooling_json, const char* response_format_json,
+                     const llm_stream_callbacks_t* callbacks);
+
+// Tool loop runner
+typedef bool (*llm_tool_dispatch_cb)(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
+                                     size_t args_len, char** result_json, size_t* result_len);
+
+bool llm_tool_loop_run(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
+                       const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
+                       size_t max_turns);
+
+// Utility functions
+llm_finish_reason_t llm_finish_reason_from_string(const char* str, size_t len);
+const char* llm_finish_reason_to_string(llm_finish_reason_t reason);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // LLM_H
