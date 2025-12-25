@@ -19,6 +19,9 @@ struct llm_client {
     llm_limits_t limits;
     char* auth_header;
     char* tls_ca_bundle_path;
+    char* tls_ca_dir_path;
+    bool tls_verify_peer;
+    bool tls_verify_host;
     bool tls_insecure;
     char* proxy_url;
     char** headers;
@@ -97,6 +100,8 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
         client->limits.max_line_bytes = 1024 * 1024;
         client->limits.max_tool_args_bytes_per_call = 1024 * 1024;
     }
+    client->tls_verify_peer = true;
+    client->tls_verify_host = true;
 
     if (!llm_client_headers_init(client, headers, headers_count)) {
         llm_client_destroy(client);
@@ -118,6 +123,7 @@ void llm_client_destroy(llm_client_t* client) {
         llm_client_headers_free(client);
         free(client->auth_header);
         free(client->tls_ca_bundle_path);
+        free(client->tls_ca_dir_path);
         free(client->proxy_url);
         free(client);
     }
@@ -179,7 +185,11 @@ bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls
 
     if (!tls) {
         free(client->tls_ca_bundle_path);
+        free(client->tls_ca_dir_path);
         client->tls_ca_bundle_path = NULL;
+        client->tls_ca_dir_path = NULL;
+        client->tls_verify_peer = true;
+        client->tls_verify_host = true;
         client->tls_insecure = false;
         return true;
     }
@@ -189,9 +199,39 @@ bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls
         ca_path = strdup(tls->ca_bundle_path);
         if (!ca_path) return false;
     }
+    char* ca_dir = NULL;
+    if (tls->ca_dir_path) {
+        ca_dir = strdup(tls->ca_dir_path);
+        if (!ca_dir) {
+            free(ca_path);
+            return false;
+        }
+    }
 
     free(client->tls_ca_bundle_path);
+    free(client->tls_ca_dir_path);
     client->tls_ca_bundle_path = ca_path;
+    client->tls_ca_dir_path = ca_dir;
+    switch (tls->verify_peer) {
+        case LLM_TLS_VERIFY_OFF:
+            client->tls_verify_peer = false;
+            break;
+        case LLM_TLS_VERIFY_ON:
+        case LLM_TLS_VERIFY_DEFAULT:
+        default:
+            client->tls_verify_peer = true;
+            break;
+    }
+    switch (tls->verify_host) {
+        case LLM_TLS_VERIFY_OFF:
+            client->tls_verify_host = false;
+            break;
+        case LLM_TLS_VERIFY_ON:
+        case LLM_TLS_VERIFY_DEFAULT:
+        default:
+            client->tls_verify_host = true;
+            break;
+    }
     client->tls_insecure = tls->insecure;
     return true;
 }
@@ -316,8 +356,10 @@ static bool llm_header_set_init(struct header_set* set, const llm_client_t* clie
 }
 
 static const llm_tls_config_t* llm_client_tls_config(const llm_client_t* client, llm_tls_config_t* out) {
-    if (!client->tls_ca_bundle_path && !client->tls_insecure) return NULL;
     out->ca_bundle_path = client->tls_ca_bundle_path;
+    out->ca_dir_path = client->tls_ca_dir_path;
+    out->verify_peer = client->tls_verify_peer ? LLM_TLS_VERIFY_ON : LLM_TLS_VERIFY_OFF;
+    out->verify_host = client->tls_verify_host ? LLM_TLS_VERIFY_ON : LLM_TLS_VERIFY_OFF;
     out->insecure = client->tls_insecure;
     return out;
 }

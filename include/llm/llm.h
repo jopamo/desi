@@ -25,10 +25,19 @@ typedef struct {
     size_t max_tool_args_bytes_per_call;
 } llm_limits_t;
 
+typedef enum {
+    LLM_TLS_VERIFY_DEFAULT = 0,
+    LLM_TLS_VERIFY_ON,
+    LLM_TLS_VERIFY_OFF,
+} llm_tls_verify_mode_t;
+
 // TLS configuration (copied into the client)
 typedef struct llm_tls_config {
     const char* ca_bundle_path;  // optional path to PEM bundle
-    bool insecure;               // explicitly disable verification
+    const char* ca_dir_path;     // optional path to CA directory
+    llm_tls_verify_mode_t verify_peer;
+    llm_tls_verify_mode_t verify_host;
+    bool insecure;  // explicitly disable verification
 } llm_tls_config_t;
 
 // Model identifier

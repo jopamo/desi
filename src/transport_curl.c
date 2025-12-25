@@ -17,15 +17,52 @@ static struct curl_slist* append_headers(struct curl_slist* list, const char* co
     return list;
 }
 
-static void apply_tls_config(CURL* curl, const llm_tls_config_t* tls) {
-    if (!tls) return;
-    if (tls->insecure) {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        return;
+static bool resolve_verify_mode(llm_tls_verify_mode_t mode, bool default_value) {
+    switch (mode) {
+        case LLM_TLS_VERIFY_OFF:
+            return false;
+        case LLM_TLS_VERIFY_ON:
+            return true;
+        case LLM_TLS_VERIFY_DEFAULT:
+        default:
+            return default_value;
     }
-    if (tls->ca_bundle_path) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, tls->ca_bundle_path);
+}
+
+static void apply_tls_config(CURL* curl, const llm_tls_config_t* tls) {
+    bool verify_peer = true;
+    bool verify_host = true;
+    const char* ca_bundle_path = NULL;
+    const char* ca_dir_path = NULL;
+    bool insecure = false;
+
+    if (tls) {
+        verify_peer = resolve_verify_mode(tls->verify_peer, verify_peer);
+        verify_host = resolve_verify_mode(tls->verify_host, verify_host);
+        ca_bundle_path = tls->ca_bundle_path;
+        ca_dir_path = tls->ca_dir_path;
+        insecure = tls->insecure;
+    }
+
+    if (insecure) {
+        verify_peer = false;
+        verify_host = false;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, verify_peer ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_host ? 2L : 0L);
+
+    const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
+    if (ca_bundle_path) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle_path);
+    } else if (info && info->cainfo && info->cainfo[0]) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, info->cainfo);
+    }
+
+    if (ca_dir_path) {
+        curl_easy_setopt(curl, CURLOPT_CAPATH, ca_dir_path);
+    } else if (info && info->capath && info->capath[0]) {
+        curl_easy_setopt(curl, CURLOPT_CAPATH, info->capath);
     }
 }
 

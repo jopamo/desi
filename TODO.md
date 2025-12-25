@@ -38,7 +38,7 @@ The library is functional end-to-end, but the remaining work is about:
     - required failure propagation behavior
   - Add tests that assert contract behavior using a fake backend
 
-- [ ] **TLS option surface audit**
+- [x] **TLS option surface audit**
   - Make every TLS knob explicit in public API
   - Minimum set:
     - CA bundle path
