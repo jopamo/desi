@@ -116,6 +116,23 @@ if get_option('tests')
     link_with: libdesi,
     install: false,
   )
+
+  test_transport_contract = executable('test_transport_contract',
+    'tests/test_transport_contract.c',
+    'src/llm.c',
+    'src/jstok_impl.c',
+    'src/json_core.c',
+    'src/json_build.c',
+    'src/protocol_chat.c',
+    'src/protocol_completions.c',
+    'src/sse.c',
+    'src/tools_accum.c',
+    'src/tools_loop.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [jstok_dep],
+    install: false,
+  )
+  test('transport_contract', test_transport_contract)
   
   # llmctl is the main test runner/CLI tool
   llmctl = executable('llmctl',

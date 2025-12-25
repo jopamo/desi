@@ -30,7 +30,7 @@ The library is functional end-to-end, but the remaining work is about:
 
 ### Tasks
 
-- [ ] **Transport contract document**
+- [x] **Transport contract document**
   - Write an internal `src/llm_transport_contract.h` comment block that defines:
     - who owns response body buffers and for how long
     - whether headers are stable during callbacks
