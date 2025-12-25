@@ -2,344 +2,452 @@
 
 This document tracks **remaining and follow-on work** to complete and harden `desi`, a minimal C LLM client and MCP server built on **`jstok` as a tokenizer/validator only**.
 
-This TODO expands on **DESIGN.md**, **HACKING.md**, and **README.md** and should be read as an execution checklist, not a wish list.
+This TODO expands on **DESIGN.md**, **HACKING.md**, and **README.md** and should be read as an execution checklist.
 
-If an item conflicts with architectural invariants, **do not implement it**.
-
----
-
-## Current Status (2025-12-25)
-
-### ✅ Implemented and Verified
-
-**Project & Build**
-- Project layout (`include/`, `src/`, `tests/`, `examples/`)
-- Meson build system with:
-  - libcurl transport
-  - vendored `jstok`
-- Clean separation of public vs internal headers
-
-**Core Library**
-- Public API (`include/llm/llm.h`)
-- Deterministic buffer ownership rules
-- No JSON DOM, no hidden allocation
-
-**JSON Handling**
-- Minimal JSON request writer (`json_build.c`)
-- JSON core helpers (`json_core.c/.h`)
-- Typed extraction helpers over `jstok` tokens
-
-**Protocol Coverage**
-- Chat completions (non-stream)
-- Streaming chat (SSE)
-- Completions endpoint (non-stream)
-- Tool call parsing and accumulation
-- Tool loop runner
-- response_format (`json_object`, `json_schema`) validation
-
-**Streaming**
-- Stateful SSE buffer with caps
-- `[DONE]` detection
-- Fragmented tool argument reassembly
-
-**Transport**
-- libcurl backend
-- Streaming callbacks
-- Size caps and failure propagation
-
-**Tests & Examples**
-- `tests/llmctl.c` matching `llm_power` expectations
-- Examples:
-  - simple chat
-  - streaming chat
-  - tool loop
+If an item conflicts with architectural invariants, do not implement it.
 
 ---
 
-## Remaining Implementation Work
+## Current Focus (2025-12-25)
 
-The sections below expand each area with **design-aligned constraints**.
+The library is functional end-to-end, but the remaining work is about:
+
+* tightening contracts
+* removing ambiguity
+* increasing protocol coverage without adding abstraction
+* making errors and limits mechanically enforceable
+* hardening streaming and tool semantics under adversarial inputs
 
 ---
 
-## 1) Transport & Authentication
+## 1) Transport, TLS, and Authentication
 
-### Goals
-Expose necessary knobs without bloating the transport layer or leaking protocol logic into it.
+### Outcomes
+* Transport remains a byte pump
+* TLS and header knobs are explicit
+* No hidden environment inspection
+* No policy decisions in transport
 
 ### Tasks
 
-- [x] **API key support**
-  - Support `Authorization: Bearer …`
-  - Never store secrets globally
-  - Allow per-client default key
+- [ ] **Transport contract document**
+  - Write an internal `src/llm_transport_contract.h` comment block that defines:
+    - who owns response body buffers and for how long
+    - whether headers are stable during callbacks
+    - streaming callback threading model
+    - required failure propagation behavior
+  - Add tests that assert contract behavior using a fake backend
 
-- [x] **Custom headers**
-  - Organization / project headers
-  - Arbitrary user-provided headers
-  - Headers are copied at client init, not per request
+- [ ] **TLS option surface audit**
+  - Make every TLS knob explicit in public API
+  - Minimum set:
+    - CA bundle path
+    - CA directory path if supported
+    - hostname verification toggle (default on)
+    - peer verification toggle (default on)
+    - explicit insecure mode (must be loud and opt-in)
+  - Ensure options never auto-load from env unless caller requests it
 
-- [x] **Per-request headers**
-  - Required for proxies, multi-tenant gateways
-  - Must not mutate client defaults
+- [ ] **mTLS support**
+  - Add explicit fields for:
+    - client cert path
+    - client key path
+    - optional key password callback
+  - Ensure:
+    - no key material is copied into long-lived memory
+    - paths are treated as config only
+    - transport backend never logs secrets
 
-- [ ] **TLS configuration**
-  - CA bundle path
-  - Optional insecure mode (explicit flag only)
-  - No implicit environment inspection
+- [ ] **API key and auth header rules**
+  - Standardize auth handling:
+    - bearer token support via caller-supplied string
+    - per-request override without mutating client defaults
+  - Add negative tests:
+    - missing key yields expected server error parse
+    - header injection does not corrupt framing
 
-- [ ] **Proxy support**
-  - Explicit proxy URL
-  - No auto-detection logic
-
-**Non-goals**
-- OAuth
-- Token refresh
-- Header mutation during retries
+- [ ] **Proxy configuration**
+  - Explicit proxy URL support
+  - Explicit no-proxy list support
+  - No auto-detection
+  - Add tests that verify proxy config is passed through unchanged
 
 ---
 
-## 2) Endpoint Coverage & Correctness
+## 2) Endpoint Coverage and Protocol Correctness
 
-### Goals
-Match real-world API surface without special cases.
+### Outcomes
+* Coverage expands without duplication
+* Pathing and endpoint naming are unambiguous
+* Multi-choice semantics are explicit
 
 ### Tasks
 
-- [ ] **Fix `/props` vs `/health`**
-  - Align implementation and tests
-  - Document exact semantics
-  - No silent aliasing
+- [ ] **Endpoint naming reconciliation**
+  - Resolve `/props` vs `/health` mismatch
+  - Choose one canonical endpoint name in code and tests
+  - If compatibility is required, expose compatibility explicitly:
+    - either a separate function
+    - or a documented config knob
+  - Never silently alias endpoints
 
 - [ ] **Streaming completions**
-  - Use existing SSE infrastructure
-  - Same extraction rules as chat streaming
-  - No duplicated code paths
+  - Implement streamed completions using the same SSE engine as chat
+  - Share extraction helpers
+  - Ensure:
+    - finish_reason handling matches chat
+    - usage and model fields behave consistently
+    - cancellation and limits apply identically
 
-- [ ] **Multiple choices support**
+- [ ] **Multiple choices**
+  - Define explicit API behavior for `n > 1`
   - Non-stream:
-    - expose `choices[]` as spans
+    - expose `choices[]` spans without allocation
+    - provide helpers to index into `choices[i]`
   - Stream:
-    - allow caller to opt into multi-choice parsing
-  - Default behavior remains `choices[0]`
+    - support parsing multiple streams by index only if caller enables it
+    - default remains `choices[0]`
+  - Add tests that validate:
+    - choices ordering stability
+    - missing indexes produce a stable error
 
 - [ ] **Embeddings endpoint**
-  - Request builder only
-  - Response parsing via jstok spans
-  - No vector math helpers
+  - Request builder with explicit bounds:
+    - input length caps
+    - number-of-inputs caps
+  - Response extraction:
+    - `data[i].embedding` returned as spans or numeric parsing helper
+  - No vector math, no allocator-heavy conversions by default
 
 ---
 
-## 3) Streaming Enhancements
+## 3) Streaming Hardening and Feature Expansion
 
-### Goals
-Make streaming robust without turning it into a framework.
+### Outcomes
+* SSE framing is hostile-input safe
+* Fragmentation behavior is deterministic
+* Tool deltas can be observed without changing aggregation mode
 
 ### Tasks
 
-- [ ] **Strict line caps**
-  - Enforce `max_line_bytes` in SSE feed
-  - Fail fast on overflow
-  - Do not truncate silently
+- [ ] **Strict line and frame caps**
+  - Enforce:
+    - `max_line_bytes`
+    - `max_frame_bytes`
+    - `max_sse_buffer_bytes`
+  - Failure behavior:
+    - return overflow error code
+    - do not truncate silently
+    - include the stage (SSE vs transport) in the error classification
+  - Add tests for:
+    - gigantic line without newline
+    - repeated partial chunks
+    - malicious never-ending frame
 
 - [ ] **Tool delta callbacks**
-  - Expose:
+  - Add optional callbacks that surface tool deltas while streaming:
     - tool_call index
-    - optional id
-    - optional name
-    - argument fragment
-  - Preserve existing aggregated mode
+    - id if present
+    - name if present
+    - raw argument fragment span
+  - Preserve existing aggregation path
+  - Ensure:
+    - delta callback does not allocate
+    - delta callback observes fragments exactly as received
 
 - [ ] **Final tool aggregation callback**
-  - Called once per completed tool call
-  - Provides validated JSON span
+  - When a tool call completes:
+    - validate args as JSON using `jstok`
+    - emit a single callback with the validated JSON span
+  - Ensure:
+    - completion detection is explicit and bounded
+    - invalid final JSON fails with a protocol error
 
-- [ ] **Cancellation support**
-  - Caller-provided abort hook
-  - Must stop transport and parsing cleanly
-  - No async signals or threads
+- [ ] **Cancellation**
+  - Add a caller-provided abort hook checked at safe points:
+    - after receiving bytes
+    - after a completed SSE frame
+    - between tool-loop turns
+  - Cancellation must:
+    - stop parsing cleanly
+    - ask transport to abort
+    - produce a stable cancellation error code
+  - No signals, no threads
 
-- [ ] **Optional stream options**
-  - `include_usage`
-  - Implement only if explicitly requested
+- [ ] **Streaming usage support**
+  - Implement `include_usage` only as an explicit request option
+  - Add tests for servers that do and do not include usage mid-stream
 
 ---
 
-## 4) Tooling & Tool Loop Extensions
+## 4) Tool Semantics and Tool Loop Extensions
 
-### Goals
-Support advanced tool flows without hiding control.
+### Outcomes
+* Full modern tool protocol support
+* Caller remains in control
+* Loop remains bounded and observable
 
 ### Tasks
 
 - [ ] **Outbound assistant tool_calls**
-  - Allow request messages with:
+  - Allow constructing requests that include:
     - `role=assistant`
-    - embedded `tool_calls`
-  - Either via expanded message struct or raw JSON injection
+    - `tool_calls[]`
+  - Provide two supported mechanisms:
+    - an expanded typed struct
+    - raw JSON injection for tool_calls only
+  - Require:
+    - deterministic serialization
+    - explicit size caps
 
 - [ ] **Tool loop parameter passthrough**
-  - `params_json`
-  - `response_format_json`
-  - Must be caller-controlled
+  - Allow caller to supply:
+    - `params_json`
+    - `response_format_json`
+    - tool selection mode knobs if supported
+  - No inference
+  - No hidden defaults beyond the documented base defaults
 
 - [ ] **Tool response helpers**
-  - Auto-attach:
-    - `tool_call_id`
-    - tool name
-  - Avoid duplication in user code
+  - Provide helpers to create tool-result messages correctly:
+    - attaches tool_call_id
+    - attaches tool name if needed by server
+  - Helpers must:
+    - be thin
+    - never execute tools
+    - avoid allocation unless the caller provides a buffer
 
-**Non-goals**
-- Automatic tool execution
-- Parallel tool dispatch
+- [ ] **Tool loop safety**
+  - Strengthen loop detection:
+    - rolling hash of:
+      - tool name
+      - args JSON bytes
+      - model message delta if relevant
+  - Enforce:
+    - max turns
+    - max total tool args bytes per turn
+    - max total output bytes appended to messages
 
 ---
 
-## 5) Error Handling & Diagnostics
+## 5) Error Handling and Diagnostics
 
-### Goals
-Errors must be inspectable, structured, and boring.
+### Outcomes
+* Errors are structured and inspectable
+* Callers can surface precise failure causes without parsing strings
+* No hidden global state
 
 ### Tasks
 
-- [ ] **Structured error result**
-  - HTTP status
-  - Raw error body span
-  - Transport vs parse vs protocol classification
+- [ ] **Unified structured error**
+  - Define a stable `llm_error_detail_t` containing:
+    - top-level error code enum
+    - stage classification (transport, tls, sse, json, protocol)
+    - http status if present
+    - best-effort parsed OpenAI error fields
+    - raw error body span when available
+  - Ensure:
+    - spans reference transport-owned buffers when possible
+    - copying is explicit
 
 - [ ] **OpenAI-style error parsing**
-  - Extract:
+  - Best-effort extraction of:
     - `error.message`
     - `error.type`
     - `error.code`
-  - Optional, best-effort
+  - Must not allocate
+  - Must not fail the request if error body is malformed
+  - Provide “not found” semantics for missing fields
 
-- [ ] **`llm_last_error()` accessor**
-  - Thread-local or per-client
-  - Read-only snapshot
-  - No hidden global state
+- [ ] **Last error storage**
+  - Provide one supported model:
+    - per-request output struct preferred
+  - If a “last error” accessor is desired:
+    - make it per-client, not global
+    - make it explicitly opt-in during client init
+    - document thread-safety rules
+  - Never use hidden global state
+
+- [ ] **Error stringification helper**
+  - Provide `llm_errstr(code)` for stable, boring text
+  - No dynamic formatting
 
 ---
 
-## 6) Request Schema & Feature Coverage
+## 6) Request Options and Feature Coverage
 
-### Goals
-Expose common knobs without turning requests into DSLs.
+### Outcomes
+* Common knobs are available without turning requests into a DSL
+* Raw injection exists only for narrow escape hatches
+* Every option remains explicitly bounded
 
 ### Tasks
-
-- [ ] **Multi-part content**
-  - Support `content[]` arrays
-  - Or allow raw JSON injection for messages
-  - No media decoding
 
 - [ ] **Request options struct**
-  - temperature
-  - top_p
-  - max_tokens
-  - stop
-  - frequency/presence penalties
-  - Always optional
+  - Define `llm_request_opts_t` with optional fields:
+    - temperature
+    - top_p
+    - max_tokens
+    - stop (array or single string)
+    - frequency_penalty
+    - presence_penalty
+    - seed
+  - All fields are optional
+  - Serialization is deterministic
+  - Bounds:
+    - max stop strings
+    - max stop bytes
+    - reject NaNs and infinities
+
+- [ ] **Multi-part content**
+  - Support `content[]` messages without media decoding
+  - Provide either:
+    - typed support for common parts
+    - or narrow raw injection for `content` only
+  - Enforce:
+    - part count cap
+    - total content bytes cap
 
 - [ ] **Model switching**
-  - `llm_client_set_model()`
+  - Provide `llm_client_set_model()` or equivalent
   - Must not invalidate in-flight requests
-  - No reallocation of client internals
+  - Must not reallocate hidden client internals
+  - Caller manages synchronization
+
+- [ ] **Reasoning fields and variants**
+  - Add extraction helpers for vendor variants if needed:
+    - `reasoning_content`
+    - separate “thinking” channels if present
+  - These must remain spans with explicit opt-in parsing
 
 ---
 
-## 7) Tests & CI Hardening
+## 7) Tests, Fuzzing, and CI Hardening
 
-### Goals
-Prevent regressions without fragile fixtures.
+### Outcomes
+* Regression prevention without brittle fixtures
+* Hostile inputs covered
+* Streaming edge cases locked down
 
 ### Tasks
 
-- [ ] **Focused unit tests**
+- [ ] **Unit test expansion**
   - finish_reason variants
-  - tool_calls parsing
-  - reasoning_content handling
+  - tool_calls parsing across fragmented frames
+  - missing fields vs optional fields semantics
+  - multi-choice indexing behavior
 
 - [ ] **SSE edge-case tests**
-  - `[DONE]`
+  - `[DONE]` behaviors
   - malformed frames
   - line overflow
   - partial UTF-8 boundaries
+  - repeated empty `data:` lines
+  - frames containing non-JSON payloads
+
+- [ ] **Fake transport backend**
+  - Create a deterministic in-memory transport for tests
+  - Must support:
+    - streaming chunk schedules
+    - injected HTTP status codes
+    - injected headers
+    - controlled buffer lifetimes
+  - This removes reliance on live servers for correctness testing
 
 - [ ] **Integration test gating**
-  - Skip when server unreachable
-  - Explicit opt-in via env var
+  - All live integration tests must be opt-in
+  - Require explicit env var or CLI flag
+  - Skip cleanly when server unreachable
 
 - [ ] **Fuzz surfaces**
-  - JSON reader helpers
   - SSE scanner
+  - JSON extraction helpers
+  - tool args accumulator
+  - Ensure fuzz harnesses are deterministic and bounded
 
 ---
 
-## 8) Examples & Usage
+## 8) Examples and Operational Patterns
 
-### Goals
-Show correct patterns, not convenience shortcuts.
+### Outcomes
+* Examples teach correct usage
+* No convenience shortcuts that violate invariants
+* Configuration patterns stay explicit
 
 ### Tasks
 
-- [ ] **Environment-driven config**
-  - `LLM_BASE_URL`
-  - `LLM_API_KEY`
+- [ ] **Environment-driven config example**
+  - Demonstrate explicit reading of:
+    - `LLM_BASE_URL`
+    - `LLM_API_KEY`
   - Document no-auth local usage
+  - Ensure the library itself does not auto-read env
 
 - [ ] **Streaming tool example**
   - Demonstrates:
     - fragmented args
-    - aggregation
-    - tool loop completion
+    - delta callbacks
+    - final aggregation
+    - bounded tool loop
+
+- [ ] **mTLS example**
+  - Demonstrate:
+    - CA override
+    - client cert + key
+    - strict verification on
+  - Keep it minimal and explicit
 
 - [ ] **MCP server example**
   - Minimal invocation
   - No protocol sugar
+  - Error mapping demo
 
 ---
 
-## 9) Documentation & Release Polish
+## 9) Documentation and Release Polish
 
-### Goals
-Make the project easy to audit and embed.
+### Outcomes
+* Project is easy to audit and embed
+* Public API is stable and documented
+* Memory and limit behavior is validated
 
 ### Tasks
 
-- [ ] **API documentation**
-  - Doxygen comments in `llm.h`
-  - No prose duplication
+- [ ] **Public API documentation**
+  - Add Doxygen comments in `llm.h`
+  - Focus on:
+    - ownership rules
+    - lifetime rules
+    - error codes
+    - limit behavior
+  - Avoid duplicating prose across docs
 
-- [ ] **pkg-config verification**
-  - Ensure clean static and shared builds
+- [ ] **pkg-config correctness**
+  - Validate clean static and shared builds
+  - Ensure dependencies are correct and minimal
+  - Add a tiny compile test that uses only `pkg-config --cflags --libs`
 
 - [ ] **Memory validation**
-  - Valgrind
-  - ASan/UBSan
-  - Streaming stress tests
+  - ASan/UBSan builds in CI
+  - Valgrind run for non-stream tests
+  - Streaming stress tests with fake transport
 
 - [ ] **Versioning**
   - Set initial version
   - Tag release
-  - Changelog is optional
+  - Keep changelog minimal and factual
 
 ---
 
-## Final Notes
+## Execution Rules
 
-This TODO intentionally favors:
+This TODO favors:
 
 * explicitness over coverage
 * correctness over convenience
 * boring code over clever code
 
-If a task introduces:
-- hidden allocation
-- implicit behavior
-- duplicated protocol logic
-
-it should be rejected or redesigned.
+If a task introduces hidden allocation, implicit behavior, duplicated protocol logic, or cross-layer leakage, reject or redesign it.
 
 Keep `desi` small  
 Keep it strict  

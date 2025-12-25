@@ -64,6 +64,15 @@ if get_option('tests')
   )
   test('transport', test_transport)
 
+  test_tls = executable('test_tls',
+    'tests/test_tls.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('tls', test_tls)
+
   test_json_build = executable('test_json_build',
     'tests/test_json_build.c',
     include_directories: [inc, include_directories('src')],
@@ -90,6 +99,15 @@ if get_option('tests')
     install: false,
   )
   test('auth', test_auth)
+
+  test_proxy = executable('test_proxy',
+    'tests/test_proxy.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('proxy', test_proxy)
 
   test_live = executable('test_live',
     'tests/test_live.c',

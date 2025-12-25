@@ -1,10 +1,37 @@
-# desi
+<div style="background-color:#1e1e1e; padding:1em; display:inline-block; border-radius:8px; text-align:left;">
+  <img src=".github/desi.png" alt="desi logo" width="300" style="display:block; margin:0;">
+</div>
 
 A **minimal, deterministic C client for LLM APIs**, built directly on top of **`jstok`**.
 
 `desi` is designed for **systems programmers** who want full control over parsing, streaming, and protocol behavior without pulling in a JSON DOM, a scripting runtime, or a heavyweight SDK.
 
 It also ships as an **MCP server**, exposing the same core engine to agent runtimes and external tooling.
+
+---
+
+## Where `desi` Fits
+
+`desi` is the **boring, correct transport + protocol binding** layer in a larger stack.
+
+```
+
+ET (identity, authorization, audit, policy)
+└── uses desi for outbound HTTP(S) calls
+├── llama-server (stateless inference appliance)
+├── registries
+├── internal APIs
+└── MCP servers
+
+desi = HTTP(S) client + SSE framing + zero-DOM JSON + protocol semantics
+
+```
+
+`desi` participates in **authentication** (TLS verification, optional mTLS via explicit configuration) and never **authorization**.
+
+* ET decides who is allowed and what is permitted
+* desi ensures bytes, parsing, and protocol semantics are correct and explicit
+* llama-server generates tokens and nothing else
 
 ---
 
@@ -30,6 +57,9 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
   * a C library
   * a standalone MCP server
 
+* **Mechanically bounded**  
+  Explicit limits for request/response/stream buffers and tool args
+
 ---
 
 ## Non-goals
@@ -37,7 +67,9 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
 * No generic JSON object model
 * No opinionated retry or policy engine
 * No automatic message inference
-* No transport magic beyond HTTP
+* No orchestration, scheduling, or caching
+* No transport magic beyond HTTP contracts
+* No authorization decisions
 
 ---
 
@@ -51,7 +83,7 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
 │
 ┌──────▼────────┐
 │ desi public   │
-│ API (llm.h)  │
+│ API (llm.h)   │
 └──────┬────────┘
 │
 ├───────────────────────────┐
@@ -61,6 +93,7 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
 │ • streaming orchestration │
 │ • tool loop runner        │
 │ • response_format         │
+│ • finish_reason rules     │
 └──────┬────────────────────┘
 │
 ├───────────────────────────┐
@@ -68,6 +101,7 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
 │                           │
 │ • tiny JSON writer        │
 │ • jstok-based extractors  │
+│ • span-based results      │
 └──────┬────────────────────┘
 │
 ├───────────────────────────┐
@@ -76,6 +110,7 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
 │ • incremental buffering   │
 │ • jstok_sse_next()        │
 │ • delta + tool assembly   │
+│ • [DONE] termination      │
 └──────┬────────────────────┘
 │
 ├───────────────────────────┐
@@ -83,13 +118,23 @@ It also ships as an **MCP server**, exposing the same core engine to agent runti
 │                           │
 │ • pluggable vtable        │
 │ • libcurl backend         │
+│ • TLS verify + mTLS       │
 └──────┬────────────────────┘
 │
 ┌──────▼────────┐
-│ HTTP server   │
+│ Remote server │
 └───────────────┘
 
 ```
+
+Layer rules:
+
+* transport is a byte pump
+* SSE does framing only
+* JSON does tokenization and extraction only
+* protocol owns semantics and validation
+
+No layer mutates data owned by another layer.
 
 ---
 
@@ -102,16 +147,16 @@ llm.h                 public API
 
 src/
 llm_transport_curl.c  HTTP backend
-llm_json_write.c     minimal JSON writer
-llm_json_read.c      jstok-based extractors
-llm_sse.c            streaming + SSE framing
+llm_json_write.c      minimal JSON writer
+llm_json_read.c       jstok-based extractors
+llm_sse.c             streaming + SSE framing
 llm_chat.c
 llm_completions.c
 llm_tools.c
-mcp_server.c         MCP server implementation
+mcp_server.c          MCP server implementation
 
 third_party/
-jstok.h              vendored tokenizer
+jstok.h               vendored tokenizer
 
 tests/
 llmctl.c              mirrors llm_power expectations
@@ -122,21 +167,54 @@ llmctl.c              mirrors llm_power expectations
 
 ## jstok Integration Contract
 
-`jstok` is used **only** for:
+`jstok` is used only for:
 
 * Tokenizing response JSON
 * Extracting fields via paths
 * Validating JSON fragments
 * Scanning SSE `data:` frames
 
-It is **not** used for:
+It is not used for:
 
 * Request construction
 * Object ownership
 * Protocol logic
-* Schema enforcement
+* Schema enforcement beyond local validation
+* Caching or memoization
 
 This keeps parsing predictable and allocation-free.
+
+---
+
+## Memory and Ownership Model
+
+`desi` is span-first.
+
+* response JSON buffers are owned by the transport
+* all extracted values are spans into those buffers
+* copying is explicit and opt-in
+* no hidden allocation in extraction helpers
+
+Streaming buffers:
+
+* are owned by per-request stream state
+* are bounded and compacted
+* must remain stable across partial reads
+
+If a function allocates, it must be obvious from the API.
+
+---
+
+## Error Model
+
+Errors are values, not logs.
+
+* public APIs return error codes
+* errors identify the failing stage (transport, SSE framing, parse, protocol)
+* partial success is not allowed unless explicitly designed
+* server incorrectness is treated as a normal error path
+
+`desi` does not hide failures.
 
 ---
 
@@ -155,15 +233,16 @@ Fragmented tool arguments are reassembled exactly as sent.
 
 ## Tool Call Semantics
 
-`desi` fully implements the modern tool protocol:
+`desi` implements the modern tool protocol:
 
 * Multiple tool calls per turn
 * Fragmented streaming arguments
 * Stable call indexing
 * Optional `id` handling
 * Deterministic loop execution
+* Explicit caller-controlled tool execution
 
-Tool execution is explicit and caller-controlled.
+Tool execution is never implicit.
 
 ---
 
@@ -176,31 +255,49 @@ Supported request formats:
 
 Validation behavior:
 
-* Returned content is re-parsed with `jstok`
-* Invalid JSON is rejected immediately
-* Optional shallow shape checks are possible but not required
+* returned content is re-parsed with `jstok`
+* invalid JSON is rejected immediately
+* any additional shape checks must be explicit and bounded
 
-This matches server-side guarantees while keeping the client strict.
+`desi` treats response_format promises as untrusted until validated.
+
+---
+
+## TLS and mTLS
+
+Defaults:
+
+* TLS verification on
+* system trust store by default
+* hostname verification on
+
+Optional:
+
+* mTLS via explicit client cert + key configuration
+
+`desi` does not decide who is authorized.
+
+It only ensures the cryptographic session is correct per configuration.
 
 ---
 
 ## MCP Server Mode
 
-`desi` can run as an **MCP server**, exposing:
+`desi` can run as an MCP server, exposing:
 
-* Chat
-* Streaming chat
-* Tool execution
-* Structured JSON responses
+* chat
+* streaming chat
+* tool loop coordination
+* structured JSON responses
 
 The MCP server:
 
-* Uses the same core engine
-* Adds no extra parsing layers
-* Emits structured JSON only
-* Is suitable for agent runtimes and orchestration tools
+* uses the same core engine
+* adds no extra parsing layers
+* maps errors directly
+* preserves streaming semantics
 
-This makes `desi` usable both as a **library** and a **process-level capability provider**.
+If MCP behavior differs from library behavior, that is a bug.
 
 ---
 
@@ -221,9 +318,10 @@ meson compile -C build
 
 All tests validate behavior by:
 
-* Parsing responses with `jstok`
-* Asserting extracted fields
-* Verifying streaming and tool correctness
+* parsing responses with `jstok`
+* asserting extracted fields and spans
+* verifying streaming and tool correctness
+* exercising failure paths and limits
 
 ---
 
@@ -231,9 +329,9 @@ All tests validate behavior by:
 
 See `examples/` for:
 
-* Non-stream chat
-* Streaming SSE
-* Tool loop execution
+* non-stream chat
+* streaming SSE
+* tool loop execution
 * MCP server invocation
 
 ---
@@ -241,3 +339,4 @@ See `examples/` for:
 ## License
 
 MIT
+

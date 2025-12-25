@@ -25,6 +25,12 @@ typedef struct {
     size_t max_tool_args_bytes_per_call;
 } llm_limits_t;
 
+// TLS configuration (copied into the client)
+typedef struct llm_tls_config {
+    const char* ca_bundle_path;  // optional path to PEM bundle
+    bool insecure;               // explicitly disable verification
+} llm_tls_config_t;
+
 // Model identifier
 typedef struct {
     const char* name;
@@ -122,6 +128,10 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
 void llm_client_destroy(llm_client_t* client);
 // Copies api_key into a per-client Authorization header. Pass NULL to clear.
 bool llm_client_set_api_key(llm_client_t* client, const char* api_key);
+// Copies TLS config into the client. Pass NULL to clear.
+bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls);
+// Copies proxy URL into the client. Pass NULL or empty to clear.
+bool llm_client_set_proxy(llm_client_t* client, const char* proxy_url);
 
 // Health check
 bool llm_health(llm_client_t* client);
@@ -145,9 +155,8 @@ bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t*
 bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len,
                      const char* params_json,  // optional JSON string
                      const char*** texts, size_t* count);
-bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
-                                  const char* params_json, const char*** texts, size_t* count,
-                                  const char* const* headers, size_t headers_count);
+bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                                  const char*** texts, size_t* count, const char* const* headers, size_t headers_count);
 void llm_completions_free(const char** texts, size_t count);
 
 // Chat non-stream

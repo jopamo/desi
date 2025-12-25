@@ -17,6 +17,27 @@ static struct curl_slist* append_headers(struct curl_slist* list, const char* co
     return list;
 }
 
+static void apply_tls_config(CURL* curl, const llm_tls_config_t* tls) {
+    if (!tls) return;
+    if (tls->insecure) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        return;
+    }
+    if (tls->ca_bundle_path) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, tls->ca_bundle_path);
+    }
+}
+
+static void apply_proxy_config(CURL* curl, const char* proxy_url) {
+    if (proxy_url && proxy_url[0]) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url);
+    } else {
+        // Empty string disables libcurl environment proxy lookup.
+        curl_easy_setopt(curl, CURLOPT_PROXY, "");
+    }
+}
+
 static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t realsize = size * nmemb;
     struct write_ctx* ctx = (struct write_ctx*)userdata;
@@ -27,7 +48,7 @@ static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, char** body, size_t* len) {
+              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, char** body, size_t* len) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -39,6 +60,8 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
     header_list = append_headers(header_list, headers, headers_count);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    apply_tls_config(curl, tls);
+    apply_proxy_config(curl, proxy_url);
     if (header_list) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     }
@@ -70,7 +93,8 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 }
 
 bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, char** body, size_t* len) {
+               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
+               char** body, size_t* len) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -83,6 +107,8 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
     header_list = append_headers(header_list, headers, headers_count);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    apply_tls_config(curl, tls);
+    apply_proxy_config(curl, proxy_url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
@@ -121,7 +147,8 @@ static size_t stream_write_cb(void* ptr, size_t size, size_t nmemb, void* userda
 }
 
 bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, stream_cb cb, void* user_data) {
+                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
+                      const char* proxy_url, stream_cb cb, void* user_data) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -135,6 +162,8 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
     } ctx = {cb, user_data};
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    apply_tls_config(curl, tls);
+    apply_proxy_config(curl, proxy_url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
