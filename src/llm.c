@@ -18,10 +18,61 @@ struct llm_client {
     llm_timeout_t timeout;
     llm_limits_t limits;
     char* auth_header;
+    char** headers;
+    size_t headers_count;
+    size_t custom_headers_count;
+    size_t headers_cap;
 };
 
-llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
-                                const llm_limits_t* limits) {
+void llm_client_destroy(llm_client_t* client);
+
+static void llm_client_headers_free(llm_client_t* client) {
+    if (!client) return;
+    if (client->headers) {
+        for (size_t i = 0; i < client->custom_headers_count; i++) {
+            free(client->headers[i]);
+        }
+        free(client->headers);
+    }
+    client->headers = NULL;
+    client->headers_count = 0;
+    client->custom_headers_count = 0;
+    client->headers_cap = 0;
+}
+
+static bool llm_client_headers_init(llm_client_t* client, const char* const* headers, size_t headers_count) {
+    if (headers_count == 0) {
+        client->headers = NULL;
+        client->headers_count = 0;
+        client->custom_headers_count = 0;
+        client->headers_cap = 0;
+        return true;
+    }
+
+    client->headers_cap = headers_count + 1;
+    client->headers = calloc(client->headers_cap, sizeof(char*));
+    if (!client->headers) return false;
+
+    for (size_t i = 0; i < headers_count; i++) {
+        if (!headers[i]) {
+            llm_client_headers_free(client);
+            return false;
+        }
+        client->headers[i] = strdup(headers[i]);
+        if (!client->headers[i]) {
+            llm_client_headers_free(client);
+            return false;
+        }
+        client->custom_headers_count++;
+        client->headers_count++;
+    }
+
+    return true;
+}
+
+llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_model_t* model,
+                                             const llm_timeout_t* timeout, const llm_limits_t* limits,
+                                             const char* const* headers, size_t headers_count) {
     llm_client_t* client = malloc(sizeof(*client));
     if (!client) return NULL;
     memset(client, 0, sizeof(*client));
@@ -44,13 +95,24 @@ llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, 
         client->limits.max_tool_args_bytes_per_call = 1024 * 1024;
     }
 
+    if (!llm_client_headers_init(client, headers, headers_count)) {
+        llm_client_destroy(client);
+        return NULL;
+    }
+
     return client;
+}
+
+llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
+                                const llm_limits_t* limits) {
+    return llm_client_create_with_headers(base_url, model, timeout, limits, NULL, 0);
 }
 
 void llm_client_destroy(llm_client_t* client) {
     if (client) {
         free(client->base_url);
         free((char*)client->model.name);
+        llm_client_headers_free(client);
         free(client->auth_header);
         free(client);
     }
@@ -62,6 +124,10 @@ bool llm_client_set_api_key(llm_client_t* client, const char* api_key) {
     if (!api_key) {
         free(client->auth_header);
         client->auth_header = NULL;
+        if (client->headers && client->headers_count > client->custom_headers_count) {
+            client->headers[client->custom_headers_count] = NULL;
+            client->headers_count = client->custom_headers_count;
+        }
         return true;
     }
 
@@ -73,17 +139,44 @@ bool llm_client_set_api_key(llm_client_t* client, const char* api_key) {
     memcpy(header, prefix, prefix_len);
     memcpy(header + prefix_len, api_key, key_len);
     header[prefix_len + key_len] = '\0';
+
+    if (!client->headers) {
+        size_t new_cap = client->custom_headers_count ? client->custom_headers_count + 1 : 1;
+        client->headers = calloc(new_cap, sizeof(char*));
+        if (!client->headers) {
+            free(header);
+            return false;
+        }
+        client->headers_cap = new_cap;
+    } else if (client->headers_cap < client->custom_headers_count + 1) {
+        size_t new_cap = client->custom_headers_count + 1;
+        char** next = realloc(client->headers, new_cap * sizeof(char*));
+        if (!next) {
+            free(header);
+            return false;
+        }
+        for (size_t i = client->headers_cap; i < new_cap; i++) {
+            next[i] = NULL;
+        }
+        client->headers = next;
+        client->headers_cap = new_cap;
+    }
+
     free(client->auth_header);
     client->auth_header = header;
+    client->headers[client->custom_headers_count] = client->auth_header;
+    client->headers_count = client->custom_headers_count + 1;
     return true;
 }
 
-static size_t llm_collect_headers(const llm_client_t* client, const char** headers, size_t max_headers) {
-    size_t count = 0;
-    if (client->auth_header && count < max_headers) {
-        headers[count++] = client->auth_header;
+static void llm_collect_headers(const llm_client_t* client, const char* const** headers, size_t* headers_count) {
+    if (client->headers_count == 0 || !client->headers) {
+        *headers = NULL;
+        *headers_count = 0;
+        return;
     }
-    return count;
+    *headers = (const char* const*)client->headers;
+    *headers_count = client->headers_count;
 }
 
 bool llm_health(llm_client_t* client) {
@@ -91,8 +184,9 @@ bool llm_health(llm_client_t* client) {
     snprintf(url, sizeof(url), "%s/health", client->base_url);
     char* body = NULL;
     size_t len = 0;
-    const char* headers[1];
-    size_t headers_count = llm_collect_headers(client, headers, 1);
+    const char* const* headers = NULL;
+    size_t headers_count = 0;
+    llm_collect_headers(client, &headers, &headers_count);
     bool ok = http_get(url, client->timeout.connect_timeout_ms, 1024, headers, headers_count, &body, &len);
     free(body);
     return ok;
@@ -103,8 +197,9 @@ char** llm_models_list(llm_client_t* client, size_t* count) {
     snprintf(url, sizeof(url), "%s/v1/models", client->base_url);
     char* body = NULL;
     size_t len = 0;
-    const char* headers[1];
-    size_t headers_count = llm_collect_headers(client, headers, 1);
+    const char* const* headers = NULL;
+    size_t headers_count = 0;
+    llm_collect_headers(client, &headers, &headers_count);
     if (!http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, headers, headers_count,
                   &body, &len)) {
         return NULL;
@@ -163,8 +258,9 @@ void llm_models_list_free(char** models, size_t count) {
 bool llm_props_get(llm_client_t* client, const char** json, size_t* len) {
     char url[1024];
     snprintf(url, sizeof(url), "%s/health", client->base_url);
-    const char* headers[1];
-    size_t headers_count = llm_collect_headers(client, headers, 1);
+    const char* const* headers = NULL;
+    size_t headers_count = 0;
+    llm_collect_headers(client, &headers, &headers_count);
     return http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, headers, headers_count,
                     (char**)json, len);
 }
@@ -184,8 +280,9 @@ bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len
 
     char* response_body = NULL;
     size_t response_len = 0;
-    const char* headers[1];
-    size_t headers_count = llm_collect_headers(client, headers, 1);
+    const char* const* headers = NULL;
+    size_t headers_count = 0;
+    llm_collect_headers(client, &headers, &headers_count);
     bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
                         headers, headers_count, &response_body, &response_len);
     free(request_json);
@@ -222,8 +319,9 @@ bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messag
 
     char* response_body = NULL;
     size_t response_len = 0;
-    const char* headers[1];
-    size_t headers_count = llm_collect_headers(client, headers, 1);
+    const char* const* headers = NULL;
+    size_t headers_count = 0;
+    llm_collect_headers(client, &headers, &headers_count);
     bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
                         headers, headers_count, &response_body, &response_len);
     free(request_json);
@@ -326,8 +424,9 @@ bool llm_chat_stream(llm_client_t* client, const llm_message_t* messages, size_t
     sse_set_callback(sse, on_sse_data, &ctx);
 
     curl_stream_ctx cs = {sse, &ctx};
-    const char* headers[1];
-    size_t headers_count = llm_collect_headers(client, headers, 1);
+    const char* const* headers = NULL;
+    size_t headers_count = 0;
+    llm_collect_headers(client, &headers, &headers_count);
     bool ok = http_post_stream(url, request_json, client->timeout.overall_timeout_ms,
                                client->timeout.read_idle_timeout_ms, headers, headers_count, curl_stream_cb, &cs);
 

@@ -74,7 +74,7 @@ Expose necessary knobs without bloating the transport layer or leaking protocol 
   - Never store secrets globally
   - Allow per-client default key
 
-- [ ] **Custom headers**
+- [x] **Custom headers**
   - Organization / project headers
   - Arbitrary user-provided headers
   - Headers are copied at client init, not per request

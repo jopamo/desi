@@ -17,13 +17,20 @@
 #define JSTOK_HEADER
 #include <jstok.h>
 
-#define ASSERT(cond, msg)         \
-    do {                          \
-        if (!(cond)) {            \
+#define ASSERT(cond, msg)                       \
+    do {                                        \
+        if (!(cond)) {                          \
             fprintf(stderr, "FAIL: %s\n", msg); \
-            return false;         \
-        }                         \
+            return false;                       \
+        }                                       \
     } while (0)
+
+struct expected_headers {
+    const char* auth;
+    const char* org;
+    const char* project;
+    const char* custom;
+};
 
 struct stream_capture {
     char* data;
@@ -131,8 +138,7 @@ static bool header_value(const char* buf, size_t header_len, const char* key, ch
     while (cursor < end) {
         const char* line_end = strstr(cursor, "\r\n");
         if (!line_end || line_end > end) break;
-        if ((size_t)(line_end - cursor) > key_len + 1 && strncmp(cursor, key, key_len) == 0 &&
-            cursor[key_len] == ':') {
+        if ((size_t)(line_end - cursor) > key_len + 1 && strncmp(cursor, key, key_len) == 0 && cursor[key_len] == ':') {
             const char* val = cursor + key_len + 1;
             while (val < line_end && (*val == ' ' || *val == '\t')) val++;
             size_t len = (size_t)(line_end - val);
@@ -145,6 +151,13 @@ static bool header_value(const char* buf, size_t header_len, const char* key, ch
     }
 
     return false;
+}
+
+static bool header_matches(const char* buf, size_t header_len, const char* key, const char* expected) {
+    if (!expected) return true;
+    char value[256];
+    if (!header_value(buf, header_len, key, value, sizeof(value))) return false;
+    return strcmp(value, expected) == 0;
 }
 
 static bool header_has_token(const char* buf, size_t header_len, const char* key, const char* token) {
@@ -217,40 +230,52 @@ static bool send_not_found(int fd) {
     return send_response(fd, "application/json", body, strlen(body));
 }
 
-static bool respond_health(int fd, bool auth_ok) {
-    char body[128];
-    int len = snprintf(body, sizeof(body), "{\"auth\":%s,\"path\":\"/health\"}",
-                       auth_ok ? "true" : "false");
+static bool respond_health(int fd, bool auth_ok, bool org_ok, bool project_ok, bool custom_ok) {
+    const char* auth = auth_ok ? "true" : "false";
+    const char* org = org_ok ? "true" : "false";
+    const char* project = project_ok ? "true" : "false";
+    const char* custom = custom_ok ? "true" : "false";
+    char body[256];
+    int len = snprintf(body, sizeof(body), "{\"auth\":%s,\"org\":%s,\"project\":%s,\"custom\":%s,\"path\":\"/health\"}",
+                       auth, org, project, custom);
     if (len < 0 || (size_t)len >= sizeof(body)) return false;
     return send_response(fd, "application/json", body, (size_t)len);
 }
 
-static bool respond_chat(int fd, bool auth_ok) {
+static bool respond_chat(int fd, bool auth_ok, bool org_ok, bool project_ok, bool custom_ok) {
     const char* auth = auth_ok ? "true" : "false";
-    char body[512];
+    const char* org = org_ok ? "true" : "false";
+    const char* project = project_ok ? "true" : "false";
+    const char* custom = custom_ok ? "true" : "false";
+    char body[768];
     int len = snprintf(body, sizeof(body),
                        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{"
-                       "\"content\":\"{\\\"auth\\\":%s,\\\"mode\\\":\\\"chat\\\"}\","
+                       "\"content\":\"{\\\"auth\\\":%s,\\\"org\\\":%s,\\\"project\\\":%s,\\\"custom\\\":%s,"
+                       "\\\"mode\\\":\\\"chat\\\"}\","
                        "\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"ping\","
-                       "\"arguments\":\"{\\\"echo\\\":\\\"ok\\\",\\\"auth\\\":%s}\"}}]}}]}",
-                       auth, auth);
+                       "\"arguments\":\"{\\\"echo\\\":\\\"ok\\\",\\\"auth\\\":%s,\\\"org\\\":%s,\\\"project\\\":%s,"
+                       "\\\"custom\\\":%s}\"}}]}}]}",
+                       auth, org, project, custom, auth, org, project, custom);
     if (len < 0 || (size_t)len >= sizeof(body)) return false;
     return send_response(fd, "application/json", body, (size_t)len);
 }
 
-static bool respond_chat_stream(int fd, bool auth_ok) {
+static bool respond_chat_stream(int fd, bool auth_ok, bool org_ok, bool project_ok, bool custom_ok) {
     const char* auth = auth_ok ? "true" : "false";
-    char body[512];
+    const char* org = org_ok ? "true" : "false";
+    const char* project = project_ok ? "true" : "false";
+    const char* custom = custom_ok ? "true" : "false";
+    char body[640];
     int len = snprintf(body, sizeof(body),
-                       "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"auth\\\":%s,"
-                       "\\\"mode\\\":\\\"stream\\\"}\"}}]}\n\n"
+                       "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"auth\\\":%s,\\\"org\\\":%s,"
+                       "\\\"project\\\":%s,\\\"custom\\\":%s,\\\"mode\\\":\\\"stream\\\"}\"}}]}\n\n"
                        "data: [DONE]\n\n",
-                       auth);
+                       auth, org, project, custom);
     if (len < 0 || (size_t)len >= sizeof(body)) return false;
     return send_response(fd, "text/event-stream", body, (size_t)len);
 }
 
-static bool handle_request(int fd, const char* expected_auth) {
+static bool handle_request(int fd, const struct expected_headers* expected) {
     char buf[8192];
     size_t header_len = 0;
     size_t body_len = 0;
@@ -261,11 +286,10 @@ static bool handle_request(int fd, const char* expected_auth) {
     char path[256] = {0};
     if (!parse_request_line(buf, method, sizeof(method), path, sizeof(path))) return false;
 
-    char auth_value[256];
-    bool auth_ok = false;
-    if (header_value(buf, header_len, "Authorization", auth_value, sizeof(auth_value))) {
-        auth_ok = strcmp(auth_value, expected_auth) == 0;
-    }
+    bool auth_ok = header_matches(buf, header_len, "Authorization", expected->auth);
+    bool org_ok = header_matches(buf, header_len, "OpenAI-Organization", expected->org);
+    bool project_ok = header_matches(buf, header_len, "OpenAI-Project", expected->project);
+    bool custom_ok = header_matches(buf, header_len, "X-Custom-Header", expected->custom);
 
     const char* body = buf + header_len + 4;
     bool is_stream = false;
@@ -274,23 +298,23 @@ static bool handle_request(int fd, const char* expected_auth) {
     }
 
     if (strcmp(method, "GET") == 0 && strcmp(path, "/health") == 0) {
-        return respond_health(fd, auth_ok);
+        return respond_health(fd, auth_ok, org_ok, project_ok, custom_ok);
     }
     if (strcmp(method, "POST") == 0 && strcmp(path, "/v1/chat/completions") == 0) {
         if (is_stream) {
-            return respond_chat_stream(fd, auth_ok);
+            return respond_chat_stream(fd, auth_ok, org_ok, project_ok, custom_ok);
         }
-        return respond_chat(fd, auth_ok);
+        return respond_chat(fd, auth_ok, org_ok, project_ok, custom_ok);
     }
 
     return send_not_found(fd);
 }
 
-static void server_loop(int listener, const char* expected_auth, int requests) {
+static void server_loop(int listener, const struct expected_headers* expected, int requests) {
     for (int i = 0; i < requests; i++) {
         int fd = accept(listener, NULL, NULL);
         if (fd < 0) _exit(1);
-        bool ok = handle_request(fd, expected_auth);
+        bool ok = handle_request(fd, expected);
         close(fd);
         if (!ok) _exit(1);
     }
@@ -403,6 +427,9 @@ static bool assert_auth_payload(const char* escaped, size_t len, const char* exp
     ASSERT(parse_json_tokens(unescaped, unescaped_len, &tokens, &count), "parse content JSON");
     ASSERT(tokens[0].type == JSTOK_OBJECT, "content JSON object");
     ASSERT(json_expect_bool(unescaped, tokens, count, 0, "auth", true), "content auth true");
+    ASSERT(json_expect_bool(unescaped, tokens, count, 0, "org", true), "content org true");
+    ASSERT(json_expect_bool(unescaped, tokens, count, 0, "project", true), "content project true");
+    ASSERT(json_expect_bool(unescaped, tokens, count, 0, "custom", true), "content custom true");
     ASSERT(json_expect_string(unescaped, tokens, count, 0, "mode", expected_mode), "content mode");
 
     free(tokens);
@@ -420,6 +447,9 @@ static bool assert_tool_args(const char* escaped, size_t len) {
     ASSERT(parse_json_tokens(unescaped, unescaped_len, &tokens, &count), "parse tool args JSON");
     ASSERT(tokens[0].type == JSTOK_OBJECT, "tool args JSON object");
     ASSERT(json_expect_bool(unescaped, tokens, count, 0, "auth", true), "tool args auth true");
+    ASSERT(json_expect_bool(unescaped, tokens, count, 0, "org", true), "tool args org true");
+    ASSERT(json_expect_bool(unescaped, tokens, count, 0, "project", true), "tool args project true");
+    ASSERT(json_expect_bool(unescaped, tokens, count, 0, "custom", true), "tool args custom true");
     ASSERT(json_expect_string(unescaped, tokens, count, 0, "echo", "ok"), "tool args echo");
 
     free(tokens);
@@ -449,6 +479,16 @@ int main(void) {
     char expected_auth[256];
     snprintf(expected_auth, sizeof(expected_auth), "Bearer %s", api_key);
 
+    const char* org_value = "org-test";
+    const char* project_value = "proj-test";
+    const char* custom_value = "custom-test";
+    const char* headers[] = {
+        "OpenAI-Organization: org-test",
+        "OpenAI-Project: proj-test",
+        "X-Custom-Header: custom-test",
+    };
+    struct expected_headers expected = {expected_auth, org_value, project_value, custom_value};
+
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "fork failed\n");
@@ -457,7 +497,7 @@ int main(void) {
     }
 
     if (pid == 0) {
-        server_loop(listener, expected_auth, 3);
+        server_loop(listener, &expected, 3);
     }
     close(listener);
 
@@ -466,7 +506,8 @@ int main(void) {
 
     int exit_code = 1;
     llm_model_t model = {"test-model"};
-    llm_client_t* client = llm_client_create(base_url, &model, NULL, NULL);
+    llm_client_t* client =
+        llm_client_create_with_headers(base_url, &model, NULL, NULL, headers, sizeof(headers) / sizeof(headers[0]));
     if (!client) {
         fprintf(stderr, "Client creation failed\n");
         stop_server(pid);
@@ -499,8 +540,10 @@ int main(void) {
         return 1;
     }
 
-    if (tokens[0].type != JSTOK_OBJECT ||
-        !json_expect_bool(props_json, tokens, count, 0, "auth", true) ||
+    if (tokens[0].type != JSTOK_OBJECT || !json_expect_bool(props_json, tokens, count, 0, "auth", true) ||
+        !json_expect_bool(props_json, tokens, count, 0, "org", true) ||
+        !json_expect_bool(props_json, tokens, count, 0, "project", true) ||
+        !json_expect_bool(props_json, tokens, count, 0, "custom", true) ||
         !json_expect_string(props_json, tokens, count, 0, "path", "/health")) {
         fprintf(stderr, "Props JSON assertions failed\n");
         free(tokens);
