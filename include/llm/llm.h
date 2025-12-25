@@ -125,20 +125,29 @@ bool llm_client_set_api_key(llm_client_t* client, const char* api_key);
 
 // Health check
 bool llm_health(llm_client_t* client);
+// Per-request headers are not copied; entries override client defaults with the same name (case-insensitive).
+bool llm_health_with_headers(llm_client_t* client, const char* const* headers, size_t headers_count);
 
 // Models list (simple string array)
 char** llm_models_list(llm_client_t* client, size_t* count);
+char** llm_models_list_with_headers(llm_client_t* client, size_t* count, const char* const* headers,
+                                    size_t headers_count);
 void llm_models_list_free(char** models, size_t count);
 
 // Properties (server info)
 // Returns JSON span (caller can parse)
 bool llm_props_get(llm_client_t* client, const char** json, size_t* len);
+bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t* len, const char* const* headers,
+                                size_t headers_count);
 
 // Completions (non-stream)
 // Returns array of text spans
 bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len,
                      const char* params_json,  // optional JSON string
                      const char*** texts, size_t* count);
+bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                  const char* params_json, const char*** texts, size_t* count,
+                                  const char* const* headers, size_t headers_count);
 void llm_completions_free(const char** texts, size_t count);
 
 // Chat non-stream
@@ -147,12 +156,19 @@ bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messag
               const char* tooling_json,          // optional
               const char* response_format_json,  // optional
               llm_chat_result_t* result);
+bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                           const char* params_json, const char* tooling_json, const char* response_format_json,
+                           llm_chat_result_t* result, const char* const* headers, size_t headers_count);
 void llm_chat_result_free(llm_chat_result_t* result);
 
 // Chat stream
 bool llm_chat_stream(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
                      const char* params_json, const char* tooling_json, const char* response_format_json,
                      const llm_stream_callbacks_t* callbacks);
+bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                  const char* params_json, const char* tooling_json, const char* response_format_json,
+                                  const llm_stream_callbacks_t* callbacks, const char* const* headers,
+                                  size_t headers_count);
 
 // Tool loop runner
 typedef bool (*llm_tool_dispatch_cb)(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
@@ -161,6 +177,9 @@ typedef bool (*llm_tool_dispatch_cb)(void* user_data, const char* tool_name, siz
 bool llm_tool_loop_run(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
                        const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
                        size_t max_turns);
+bool llm_tool_loop_run_with_headers(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
+                                    const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
+                                    size_t max_turns, const char* const* headers, size_t headers_count);
 
 // Utility functions
 llm_finish_reason_t llm_finish_reason_from_string(const char* str, size_t len);

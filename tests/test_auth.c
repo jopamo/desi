@@ -314,7 +314,7 @@ static void server_loop(int listener, const struct expected_headers* expected, i
     for (int i = 0; i < requests; i++) {
         int fd = accept(listener, NULL, NULL);
         if (fd < 0) _exit(1);
-        bool ok = handle_request(fd, expected);
+        bool ok = handle_request(fd, &expected[i]);
         close(fd);
         if (!ok) _exit(1);
     }
@@ -359,6 +359,20 @@ static bool json_expect_string(const char* json, const jstoktok_t* tokens, int c
     jstok_span_t sp = jstok_span(json, &tokens[idx]);
     size_t expected_len = strlen(expected);
     return sp.n == expected_len && memcmp(sp.p, expected, expected_len) == 0;
+}
+
+static bool assert_props_json(const char* json, size_t len, const char* expected_path) {
+    jstoktok_t* tokens = NULL;
+    int count = 0;
+    ASSERT(parse_json_tokens(json, len, &tokens, &count), "parse props JSON");
+    ASSERT(tokens[0].type == JSTOK_OBJECT, "props JSON object");
+    ASSERT(json_expect_bool(json, tokens, count, 0, "auth", true), "props auth true");
+    ASSERT(json_expect_bool(json, tokens, count, 0, "org", true), "props org true");
+    ASSERT(json_expect_bool(json, tokens, count, 0, "project", true), "props project true");
+    ASSERT(json_expect_bool(json, tokens, count, 0, "custom", true), "props custom true");
+    ASSERT(json_expect_string(json, tokens, count, 0, "path", expected_path), "props path");
+    free(tokens);
+    return true;
 }
 
 static bool json_unescape_alloc(const char* escaped, size_t escaped_len, char** out, size_t* out_len) {
@@ -482,12 +496,20 @@ int main(void) {
     const char* org_value = "org-test";
     const char* project_value = "proj-test";
     const char* custom_value = "custom-test";
+    const char* custom_override_props = "custom-override";
+    const char* custom_override_chat = "custom-override-chat";
+    const char* custom_override_stream = "custom-override-stream";
     const char* headers[] = {
         "OpenAI-Organization: org-test",
         "OpenAI-Project: proj-test",
         "X-Custom-Header: custom-test",
     };
-    struct expected_headers expected = {expected_auth, org_value, project_value, custom_value};
+    struct expected_headers expected[] = {
+        {expected_auth, org_value, project_value, custom_override_props},
+        {expected_auth, org_value, project_value, custom_override_chat},
+        {expected_auth, org_value, project_value, custom_override_stream},
+        {expected_auth, org_value, project_value, custom_value},
+    };
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -497,7 +519,7 @@ int main(void) {
     }
 
     if (pid == 0) {
-        server_loop(listener, &expected, 3);
+        server_loop(listener, expected, 4);
     }
     close(listener);
 
@@ -521,44 +543,37 @@ int main(void) {
         return 1;
     }
 
+    char props_header[128];
+    char chat_header[128];
+    char stream_header[128];
+    snprintf(props_header, sizeof(props_header), "X-Custom-Header: %s", custom_override_props);
+    snprintf(chat_header, sizeof(chat_header), "X-Custom-Header: %s", custom_override_chat);
+    snprintf(stream_header, sizeof(stream_header), "X-Custom-Header: %s", custom_override_stream);
+    const char* props_headers[] = {props_header};
+    const char* chat_headers[] = {chat_header};
+    const char* stream_headers[] = {stream_header};
+
     const char* props_json = NULL;
     size_t props_len = 0;
-    if (!llm_props_get(client, &props_json, &props_len)) {
+    if (!llm_props_get_with_headers(client, &props_json, &props_len, props_headers, 1)) {
         fprintf(stderr, "Props request failed\n");
         llm_client_destroy(client);
         stop_server(pid);
         return 1;
     }
 
-    jstoktok_t* tokens = NULL;
-    int count = 0;
-    if (!parse_json_tokens(props_json, props_len, &tokens, &count)) {
-        fprintf(stderr, "Failed to parse props JSON\n");
+    if (!assert_props_json(props_json, props_len, "/health")) {
         free((char*)props_json);
         llm_client_destroy(client);
         stop_server(pid);
         return 1;
     }
 
-    if (tokens[0].type != JSTOK_OBJECT || !json_expect_bool(props_json, tokens, count, 0, "auth", true) ||
-        !json_expect_bool(props_json, tokens, count, 0, "org", true) ||
-        !json_expect_bool(props_json, tokens, count, 0, "project", true) ||
-        !json_expect_bool(props_json, tokens, count, 0, "custom", true) ||
-        !json_expect_string(props_json, tokens, count, 0, "path", "/health")) {
-        fprintf(stderr, "Props JSON assertions failed\n");
-        free(tokens);
-        free((char*)props_json);
-        llm_client_destroy(client);
-        stop_server(pid);
-        return 1;
-    }
-
-    free(tokens);
     free((char*)props_json);
 
     llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0}};
     llm_chat_result_t result;
-    if (!llm_chat(client, messages, 1, NULL, NULL, NULL, &result)) {
+    if (!llm_chat_with_headers(client, messages, 1, NULL, NULL, NULL, &result, chat_headers, 1)) {
         fprintf(stderr, "Chat request failed\n");
         llm_client_destroy(client);
         stop_server(pid);
@@ -602,7 +617,8 @@ int main(void) {
     cbs.user_data = &cap;
     cbs.on_content_delta = on_stream_content;
 
-    if (!llm_chat_stream(client, messages, 1, NULL, NULL, NULL, &cbs) || cap.failed || !cap.data) {
+    if (!llm_chat_stream_with_headers(client, messages, 1, NULL, NULL, NULL, &cbs, stream_headers, 1) || cap.failed ||
+        !cap.data) {
         fprintf(stderr, "Chat stream failed\n");
         free(cap.data);
         llm_client_destroy(client);
@@ -618,6 +634,23 @@ int main(void) {
     }
 
     free(cap.data);
+
+    const char* props_json_after = NULL;
+    size_t props_len_after = 0;
+    if (!llm_props_get(client, &props_json_after, &props_len_after)) {
+        fprintf(stderr, "Props request after stream failed\n");
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+    if (!assert_props_json(props_json_after, props_len_after, "/health")) {
+        free((char*)props_json_after);
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+    free((char*)props_json_after);
+
     llm_client_destroy(client);
 
     int status = 0;

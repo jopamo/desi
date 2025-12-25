@@ -79,7 +79,7 @@ Expose necessary knobs without bloating the transport layer or leaking protocol 
   - Arbitrary user-provided headers
   - Headers are copied at client init, not per request
 
-- [ ] **Per-request headers**
+- [x] **Per-request headers**
   - Required for proxies, multi-tenant gateways
   - Must not mutate client defaults
 
