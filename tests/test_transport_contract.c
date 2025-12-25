@@ -8,13 +8,13 @@
 #include "llm/llm.h"
 #include "transport_curl.h"
 
-#define ASSERT(cond, msg)                       \
-    do {                                        \
-        if (!(cond)) {                          \
-            fprintf(stderr, "FAIL: %s\n", msg); \
-            return false;                       \
-        }                                       \
-    } while (0)
+static bool require(bool cond, const char* msg) {
+    if (!cond) {
+        fprintf(stderr, "FAIL: %s\n", msg);
+        return false;
+    }
+    return true;
+}
 
 struct fake_transport_state {
     const char* expected_url;
@@ -224,11 +224,10 @@ static bool test_contract_body_ownership(void) {
     fake_reset();
     g_fake.headers_ok = true;
     g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post =
-        "{\"choices\":[{\"message\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}";
+    g_fake.response_post = "{\"choices\":[{\"message\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
-    ASSERT(client, "client create failed");
+    if (!require(client, "client create failed")) return false;
 
     llm_message_t msg = {0};
     msg.role = LLM_ROLE_USER;
@@ -237,20 +236,21 @@ static bool test_contract_body_ownership(void) {
 
     llm_chat_result_t result;
     bool ok = llm_chat(client, &msg, 1, NULL, NULL, NULL, &result);
-    ASSERT(ok, "llm_chat failed");
-    ASSERT(result._internal == g_fake.last_body, "response buffer not transferred");
-    ASSERT(result.content, "missing content span");
-    ASSERT(result.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch");
+    if (!require(ok, "llm_chat failed")) return false;
+    if (!require(result._internal == g_fake.last_body, "response buffer not transferred")) return false;
+    if (!require(result.content, "missing content span")) return false;
+    if (!require(result.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
-    ASSERT(extract_choice_content(g_fake.last_body, g_fake.last_body_len, "message", &expected),
-           "content parse failed");
-    ASSERT(result.content_len == expected.len, "content length mismatch");
-    ASSERT(memcmp(result.content, expected.ptr, expected.len) == 0, "content mismatch");
+    if (!require(extract_choice_content(g_fake.last_body, g_fake.last_body_len, "message", &expected),
+                 "content parse failed"))
+        return false;
+    if (!require(result.content_len == expected.len, "content length mismatch")) return false;
+    if (!require(memcmp(result.content, expected.ptr, expected.len) == 0, "content mismatch")) return false;
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    ASSERT(g_fake.headers_ok, "headers unstable during non-stream request");
+    if (!require(g_fake.headers_ok, "headers unstable during non-stream request")) return false;
     return true;
 }
 
@@ -259,19 +259,20 @@ static bool test_contract_streaming_headers(void) {
     g_fake.headers_ok = true;
     g_fake.expected_url = "http://fake/v1/chat/completions";
 
-    static const char stream_json[] =
-        "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}";
-    static const char stream_sse[] = "data: " "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}"
-                                     "\n\n"
-                                     "data: [DONE]\n\n";
+    static const char stream_json[] = "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}";
+    static const char stream_sse[] =
+        "data: "
+        "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}"
+        "\n\n"
+        "data: [DONE]\n\n";
     g_fake.stream_payload = stream_sse;
     g_fake.stream_payload_len = strlen(stream_sse);
     g_fake.stream_chunk_size = 16;
 
     const char* client_headers[] = {"X-Client: alpha"};
     llm_client_t* client = make_client("http://fake", client_headers, 1);
-    ASSERT(client, "client create failed");
-    ASSERT(llm_client_set_api_key(client, "token"), "set api key failed");
+    if (!require(client, "client create failed")) return false;
+    if (!require(llm_client_set_api_key(client, "token"), "set api key failed")) return false;
 
     const char* request_headers[] = {"X-Request: beta"};
     const char* expected_headers[] = {"X-Client: alpha", "Authorization: Bearer token", "X-Request: beta"};
@@ -292,15 +293,17 @@ static bool test_contract_streaming_headers(void) {
     callbacks.on_finish_reason = on_finish_reason;
 
     bool ok = llm_chat_stream_with_headers(client, &msg, 1, NULL, NULL, NULL, &callbacks, request_headers, 1);
-    ASSERT(ok, "llm_chat_stream failed");
-    ASSERT(g_fake.stream_cb_calls > 0, "stream callback not invoked");
-    ASSERT(g_fake.headers_ok, "headers unstable during stream callbacks");
-    ASSERT(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch");
+    if (!require(ok, "llm_chat_stream failed")) return false;
+    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake.headers_ok, "headers unstable during stream callbacks")) return false;
+    if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
-    ASSERT(extract_choice_content(stream_json, strlen(stream_json), "delta", &expected), "stream content parse failed");
-    ASSERT(cap.len == expected.len, "stream content length mismatch");
-    ASSERT(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream content mismatch");
+    if (!require(extract_choice_content(stream_json, strlen(stream_json), "delta", &expected),
+                 "stream content parse failed"))
+        return false;
+    if (!require(cap.len == expected.len, "stream content length mismatch")) return false;
+    if (!require(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream content mismatch")) return false;
 
     llm_client_destroy(client);
     return true;
@@ -313,14 +316,14 @@ static bool test_contract_failure_propagation(void) {
     g_fake.fail_get = true;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
-    ASSERT(client, "client create failed");
+    if (!require(client, "client create failed")) return false;
 
     const char* json = "stale";
     size_t len = 123;
     bool ok = llm_props_get(client, &json, &len);
-    ASSERT(!ok, "llm_props_get should fail");
-    ASSERT(json == NULL, "failure should clear body");
-    ASSERT(len == 0, "failure should clear length");
+    if (!require(!ok, "llm_props_get should fail")) return false;
+    if (!require(json == NULL, "failure should clear body")) return false;
+    if (!require(len == 0, "failure should clear length")) return false;
 
     g_fake.expected_url = "http://fake/v1/chat/completions";
     g_fake.fail_stream = true;
@@ -330,11 +333,11 @@ static bool test_contract_failure_propagation(void) {
     msg.content_len = 4;
     llm_stream_callbacks_t callbacks = {0};
     ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &callbacks);
-    ASSERT(!ok, "llm_chat_stream should fail");
-    ASSERT(g_fake.stream_cb_calls == 0, "stream callback should not run on failure");
+    if (!require(!ok, "llm_chat_stream should fail")) return false;
+    if (!require(g_fake.stream_cb_calls == 0, "stream callback should not run on failure")) return false;
 
     llm_client_destroy(client);
-    ASSERT(g_fake.headers_ok, "headers unstable during failure tests");
+    if (!require(g_fake.headers_ok, "headers unstable during failure tests")) return false;
     return true;
 }
 
