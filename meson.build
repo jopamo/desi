@@ -82,6 +82,15 @@ if get_option('tests')
   )
   test('tools_accum', test_tools_accum)
 
+  test_auth = executable('test_auth',
+    'tests/test_auth.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('auth', test_auth)
+
   test_live = executable('test_live',
     'tests/test_live.c',
     include_directories: [inc, include_directories('src')],

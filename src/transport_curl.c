@@ -10,6 +10,13 @@ struct write_ctx {
     size_t max_bytes;
 };
 
+static struct curl_slist* append_headers(struct curl_slist* list, const char* const* headers, size_t headers_count) {
+    for (size_t i = 0; i < headers_count; i++) {
+        list = curl_slist_append(list, headers[i]);
+    }
+    return list;
+}
+
 static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t realsize = size * nmemb;
     struct write_ctx* ctx = (struct write_ctx*)userdata;
@@ -19,7 +26,8 @@ static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
     return realsize;
 }
 
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, char** body, size_t* len) {
+bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
+              size_t headers_count, char** body, size_t* len) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -27,7 +35,13 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, char*
     growbuf_init(&buf, 4096);
     struct write_ctx ctx = {&buf, max_response_bytes};
 
+    struct curl_slist* header_list = NULL;
+    header_list = append_headers(header_list, headers, headers_count);
+
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    if (header_list) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms > 10000 ? 10000 : timeout_ms);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
@@ -50,12 +64,13 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, char*
         *len = 0;
     }
 
+    curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
     return success;
 }
 
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes, char** body,
-               size_t* len) {
+bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
+               const char* const* headers, size_t headers_count, char** body, size_t* len) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -63,12 +78,13 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
     growbuf_init(&buf, 4096);
     struct write_ctx ctx = {&buf, max_response_bytes};
 
-    struct curl_slist* headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
+    struct curl_slist* header_list = NULL;
+    header_list = curl_slist_append(header_list, "Content-Type: application/json");
+    header_list = append_headers(header_list, headers, headers_count);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms > 10000 ? 10000 : timeout_ms);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
@@ -89,7 +105,7 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
         *len = 0;
     }
 
-    curl_slist_free_all(headers);
+    curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
     return success;
 }
@@ -104,13 +120,14 @@ static size_t stream_write_cb(void* ptr, size_t size, size_t nmemb, void* userda
     return realsize;
 }
 
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms, stream_cb cb,
-                      void* user_data) {
+bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
+                      const char* const* headers, size_t headers_count, stream_cb cb, void* user_data) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
-    struct curl_slist* headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
+    struct curl_slist* header_list = NULL;
+    header_list = curl_slist_append(header_list, "Content-Type: application/json");
+    header_list = append_headers(header_list, headers, headers_count);
 
     struct {
         stream_cb cb;
@@ -119,7 +136,7 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms > 10000 ? 10000 : timeout_ms);
 
@@ -136,7 +153,7 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
     CURLcode res = curl_easy_perform(curl);
     bool success = (res == CURLE_OK);
 
-    curl_slist_free_all(headers);
+    curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
     return success;
 }

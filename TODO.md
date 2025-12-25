@@ -69,7 +69,7 @@ Expose necessary knobs without bloating the transport layer or leaking protocol 
 
 ### Tasks
 
-- [ ] **API key support**
+- [x] **API key support**
   - Support `Authorization: Bearer …`
   - Never store secrets globally
   - Allow per-client default key

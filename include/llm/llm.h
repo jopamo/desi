@@ -116,6 +116,8 @@ typedef struct {
 llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
                                 const llm_limits_t* limits);
 void llm_client_destroy(llm_client_t* client);
+// Copies api_key into a per-client Authorization header. Pass NULL to clear.
+bool llm_client_set_api_key(llm_client_t* client, const char* api_key);
 
 // Health check
 bool llm_health(llm_client_t* client);
