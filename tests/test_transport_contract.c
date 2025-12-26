@@ -30,6 +30,9 @@ struct fake_transport_state {
     bool fail_get;
     bool fail_post;
     bool fail_stream;
+    bool called_get;
+    bool called_post;
+    bool called_stream;
     bool headers_ok;
     size_t stream_cb_calls;
 };
@@ -89,6 +92,7 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
     (void)tls;
     (void)proxy_url;
 
+    g_fake.called_get = true;
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
         g_fake.headers_ok = false;
@@ -124,6 +128,7 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
     (void)tls;
     (void)proxy_url;
 
+    g_fake.called_post = true;
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
         g_fake.headers_ok = false;
@@ -159,6 +164,7 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
     (void)tls;
     (void)proxy_url;
 
+    g_fake.called_stream = true;
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
         g_fake.headers_ok = false;
@@ -341,7 +347,61 @@ static bool test_contract_failure_propagation(void) {
     return true;
 }
 
+static bool test_contract_header_injection_rejected(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/health";
+    g_fake.response_get = "{\"ok\":true}";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    const char* bad_headers[] = {"X-Test: ok\r\nInjected: nope"};
+    bool ok = llm_health_with_headers(client, bad_headers, 1);
+    if (!require(!ok, "llm_health_with_headers should reject injected header")) return false;
+    if (!require(!g_fake.called_get, "transport should not run with invalid header")) return false;
+
+    llm_client_destroy(client);
+    return true;
+}
+
+static bool test_contract_api_key_injection_rejected(void) {
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    bool ok = llm_client_set_api_key(client, "bad\r\nX-Evil: yes");
+    if (!require(!ok, "api key should reject injected header")) return false;
+
+    llm_client_destroy(client);
+    return true;
+}
+
+static bool test_contract_completions_missing_choices(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/completions";
+    g_fake.response_post = "{\"error\":{\"message\":\"missing\"}}";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    const char* prompt = "hi";
+    const char** texts = NULL;
+    size_t count = 0;
+    bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &texts, &count);
+    if (!require(!ok, "llm_completions should fail on missing choices")) return false;
+    if (!require(texts == NULL, "texts should be NULL on failure")) return false;
+    if (!require(count == 0, "count should be 0 on failure")) return false;
+
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during completions")) return false;
+    return true;
+}
+
 int main(void) {
+    if (!test_contract_header_injection_rejected()) return 1;
+    if (!test_contract_api_key_injection_rejected()) return 1;
+    if (!test_contract_completions_missing_choices()) return 1;
     if (!test_contract_body_ownership()) return 1;
     if (!test_contract_streaming_headers()) return 1;
     if (!test_contract_failure_propagation()) return 1;

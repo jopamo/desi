@@ -22,21 +22,24 @@ int parse_completions_response(const char* json, size_t len, const char*** texts
     *count = 0;
 
     int choices_idx = jstok_object_get(json, tokens, needed, 0, "choices");
-    if (choices_idx >= 0 && tokens[choices_idx].type == JSTOK_ARRAY) {
-        int n = tokens[choices_idx].size;
-        *texts = malloc(n * sizeof(char*));
-        for (int i = 0; i < n; i++) {
-            int choice_idx = jstok_array_at(tokens, needed, choices_idx, i);
-            if (choice_idx >= 0 && tokens[choice_idx].type == JSTOK_OBJECT) {
-                int text_idx = jstok_object_get(json, tokens, needed, choice_idx, "text");
-                if (text_idx >= 0 && tokens[text_idx].type == JSTOK_STRING) {
-                    jstok_span_t sp = jstok_span(json, &tokens[text_idx]);
-                    char* t = malloc(sp.n + 1);
-                    memcpy(t, sp.p, sp.n);
-                    t[sp.n] = '\0';
-                    (*texts)[*count] = t;
-                    (*count)++;
-                }
+    if (choices_idx < 0 || tokens[choices_idx].type != JSTOK_ARRAY || tokens[choices_idx].size <= 0) {
+        free(tokens);
+        return -1;
+    }
+
+    int n = tokens[choices_idx].size;
+    *texts = malloc(n * sizeof(char*));
+    for (int i = 0; i < n; i++) {
+        int choice_idx = jstok_array_at(tokens, needed, choices_idx, i);
+        if (choice_idx >= 0 && tokens[choice_idx].type == JSTOK_OBJECT) {
+            int text_idx = jstok_object_get(json, tokens, needed, choice_idx, "text");
+            if (text_idx >= 0 && tokens[text_idx].type == JSTOK_STRING) {
+                jstok_span_t sp = jstok_span(json, &tokens[text_idx]);
+                char* t = malloc(sp.n + 1);
+                memcpy(t, sp.p, sp.n);
+                t[sp.n] = '\0';
+                (*texts)[*count] = t;
+                (*count)++;
             }
         }
     }

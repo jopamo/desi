@@ -211,23 +211,34 @@ static bool read_request(int fd, char* buf, size_t cap, size_t* header_len, size
     return true;
 }
 
-static bool send_response(int fd, const char* content_type, const char* body, size_t body_len) {
+static bool send_response_status(int fd, const char* status, const char* content_type, const char* body,
+                                 size_t body_len) {
     char header[512];
     int header_len = snprintf(header, sizeof(header),
-                              "HTTP/1.1 200 OK\r\n"
+                              "HTTP/1.1 %s\r\n"
                               "Content-Type: %s\r\n"
                               "Content-Length: %zu\r\n"
                               "Connection: close\r\n"
                               "\r\n",
-                              content_type, body_len);
+                              status, content_type, body_len);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) return false;
     if (!send_all(fd, header, (size_t)header_len)) return false;
     return send_all(fd, body, body_len);
 }
 
+static bool send_response(int fd, const char* content_type, const char* body, size_t body_len) {
+    return send_response_status(fd, "200 OK", content_type, body, body_len);
+}
+
 static bool send_not_found(int fd) {
     const char* body = "{\"error\":\"not found\"}";
     return send_response(fd, "application/json", body, strlen(body));
+}
+
+static bool respond_auth_error(int fd) {
+    const char* body =
+        "{\"error\":{\"message\":\"missing api key\",\"type\":\"auth_error\",\"code\":\"missing_api_key\"}}";
+    return send_response_status(fd, "401 Unauthorized", "application/json", body, strlen(body));
 }
 
 static bool respond_health(int fd, bool auth_ok, bool org_ok, bool project_ok, bool custom_ok) {
@@ -290,6 +301,10 @@ static bool handle_request(int fd, const struct expected_headers* expected) {
     bool org_ok = header_matches(buf, header_len, "OpenAI-Organization", expected->org);
     bool project_ok = header_matches(buf, header_len, "OpenAI-Project", expected->project);
     bool custom_ok = header_matches(buf, header_len, "X-Custom-Header", expected->custom);
+
+    if (!auth_ok) {
+        return respond_auth_error(fd);
+    }
 
     const char* body = buf + header_len + 4;
     bool is_stream = false;
@@ -371,6 +386,23 @@ static bool assert_props_json(const char* json, size_t len, const char* expected
     ASSERT(json_expect_bool(json, tokens, count, 0, "project", true), "props project true");
     ASSERT(json_expect_bool(json, tokens, count, 0, "custom", true), "props custom true");
     ASSERT(json_expect_string(json, tokens, count, 0, "path", expected_path), "props path");
+    free(tokens);
+    return true;
+}
+
+static bool assert_error_json(const char* json, size_t len, const char* expected_message, const char* expected_type,
+                              const char* expected_code) {
+    jstoktok_t* tokens = NULL;
+    int count = 0;
+    ASSERT(parse_json_tokens(json, len, &tokens, &count), "parse error JSON");
+    ASSERT(tokens[0].type == JSTOK_OBJECT, "error JSON object");
+
+    int error_idx = jstok_object_get(json, tokens, count, 0, "error");
+    ASSERT(error_idx >= 0 && tokens[error_idx].type == JSTOK_OBJECT, "error object");
+    ASSERT(json_expect_string(json, tokens, count, error_idx, "message", expected_message), "error message");
+    ASSERT(json_expect_string(json, tokens, count, error_idx, "type", expected_type), "error type");
+    ASSERT(json_expect_string(json, tokens, count, error_idx, "code", expected_code), "error code");
+
     free(tokens);
     return true;
 }
@@ -492,6 +524,9 @@ int main(void) {
     const char* api_key = "sk-test-123";
     char expected_auth[256];
     snprintf(expected_auth, sizeof(expected_auth), "Bearer %s", api_key);
+    const char* override_token = "sk-override-456";
+    char override_auth[256];
+    snprintf(override_auth, sizeof(override_auth), "Bearer %s", override_token);
 
     const char* org_value = "org-test";
     const char* project_value = "proj-test";
@@ -506,9 +541,12 @@ int main(void) {
     };
     struct expected_headers expected[] = {
         {expected_auth, org_value, project_value, custom_override_props},
+        {override_auth, org_value, project_value, custom_value},
         {expected_auth, org_value, project_value, custom_override_chat},
         {expected_auth, org_value, project_value, custom_override_stream},
         {expected_auth, org_value, project_value, custom_value},
+        {expected_auth, NULL, NULL, NULL},
+        {expected_auth, NULL, NULL, NULL},
     };
 
     pid_t pid = fork();
@@ -519,7 +557,7 @@ int main(void) {
     }
 
     if (pid == 0) {
-        server_loop(listener, expected, 4);
+        server_loop(listener, expected, 7);
     }
     close(listener);
 
@@ -546,10 +584,13 @@ int main(void) {
     char props_header[128];
     char chat_header[128];
     char stream_header[128];
+    char auth_override_header[128];
     snprintf(props_header, sizeof(props_header), "X-Custom-Header: %s", custom_override_props);
     snprintf(chat_header, sizeof(chat_header), "X-Custom-Header: %s", custom_override_chat);
     snprintf(stream_header, sizeof(stream_header), "X-Custom-Header: %s", custom_override_stream);
+    snprintf(auth_override_header, sizeof(auth_override_header), "Authorization: Bearer %s", override_token);
     const char* props_headers[] = {props_header};
+    const char* auth_override_headers[] = {auth_override_header};
     const char* chat_headers[] = {chat_header};
     const char* stream_headers[] = {stream_header};
 
@@ -570,6 +611,24 @@ int main(void) {
     }
 
     free((char*)props_json);
+
+    const char* props_auth_json = NULL;
+    size_t props_auth_len = 0;
+    if (!llm_props_get_with_headers(client, &props_auth_json, &props_auth_len, auth_override_headers, 1)) {
+        fprintf(stderr, "Props request with auth override failed\n");
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+
+    if (!assert_props_json(props_auth_json, props_auth_len, "/health")) {
+        free((char*)props_auth_json);
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+
+    free((char*)props_auth_json);
 
     llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0}};
     llm_chat_result_t result;
@@ -650,6 +709,44 @@ int main(void) {
         return 1;
     }
     free((char*)props_json_after);
+
+    llm_client_t* noauth_client = llm_client_create(base_url, &model, NULL, NULL);
+    if (!noauth_client) {
+        fprintf(stderr, "No-auth client creation failed\n");
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+
+    llm_message_t noauth_messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0}};
+    llm_chat_result_t noauth_result = {0};
+    if (llm_chat(noauth_client, noauth_messages, 1, NULL, NULL, NULL, &noauth_result)) {
+        fprintf(stderr, "Chat without auth should fail\n");
+        llm_chat_result_free(&noauth_result);
+        llm_client_destroy(noauth_client);
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+
+    const char* error_json = NULL;
+    size_t error_len = 0;
+    if (!llm_props_get(noauth_client, &error_json, &error_len)) {
+        fprintf(stderr, "Props request without auth failed\n");
+        llm_client_destroy(noauth_client);
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+    if (!assert_error_json(error_json, error_len, "missing api key", "auth_error", "missing_api_key")) {
+        free((char*)error_json);
+        llm_client_destroy(noauth_client);
+        llm_client_destroy(client);
+        stop_server(pid);
+        return 1;
+    }
+    free((char*)error_json);
+    llm_client_destroy(noauth_client);
 
     llm_client_destroy(client);
 

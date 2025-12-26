@@ -58,7 +58,7 @@ The library is functional end-to-end, but the remaining work is about:
     - paths are treated as config only
     - transport backend never logs secrets
 
-- [ ] **API key and auth header rules**
+- [x] **API key and auth header rules**
   - Standardize auth handling:
     - bearer token support via caller-supplied string
     - per-request override without mutating client defaults

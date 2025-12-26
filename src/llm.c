@@ -35,6 +35,8 @@ struct llm_client {
 };
 
 void llm_client_destroy(llm_client_t* client);
+static bool header_list_validate(const char* const* headers, size_t headers_count);
+static bool header_has_crlf(const char* value);
 
 static void llm_client_headers_free(llm_client_t* client) {
     if (!client) return;
@@ -51,6 +53,8 @@ static void llm_client_headers_free(llm_client_t* client) {
 }
 
 static bool llm_client_headers_init(llm_client_t* client, const char* const* headers, size_t headers_count) {
+    if (!header_list_validate(headers, headers_count)) return false;
+
     if (headers_count == 0) {
         client->headers = NULL;
         client->headers_count = 0;
@@ -147,6 +151,8 @@ bool llm_client_set_api_key(llm_client_t* client, const char* api_key) {
         }
         return true;
     }
+
+    if (header_has_crlf(api_key)) return false;
 
     const char* prefix = "Authorization: Bearer ";
     size_t prefix_len = strlen(prefix);
@@ -308,6 +314,14 @@ static void header_set_free(struct header_set* set) {
     header_set_clear(set);
 }
 
+static bool header_has_crlf(const char* value) {
+    if (!value) return false;
+    for (const char* cur = value; *cur; cur++) {
+        if (*cur == '\r' || *cur == '\n') return true;
+    }
+    return false;
+}
+
 static char header_tolower(char c) {
     if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
     return c;
@@ -349,6 +363,9 @@ static bool header_list_validate(const char* const* headers, size_t headers_coun
     if (!headers) return false;
     for (size_t i = 0; i < headers_count; i++) {
         if (!headers[i]) return false;
+        if (header_has_crlf(headers[i])) return false;
+        const char* colon = strchr(headers[i], ':');
+        if (!colon || colon == headers[i]) return false;
     }
     return true;
 }
