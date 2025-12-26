@@ -28,6 +28,7 @@ struct llm_client {
     bool tls_verify_host;
     bool tls_insecure;
     char* proxy_url;
+    char* no_proxy;
     char** headers;
     size_t headers_count;
     size_t custom_headers_count;
@@ -135,6 +136,7 @@ void llm_client_destroy(llm_client_t* client) {
         free(client->tls_client_cert_path);
         free(client->tls_client_key_path);
         free(client->proxy_url);
+        free(client->no_proxy);
         free(client);
     }
 }
@@ -296,6 +298,23 @@ bool llm_client_set_proxy(llm_client_t* client, const char* proxy_url) {
     return true;
 }
 
+bool llm_client_set_no_proxy(llm_client_t* client, const char* no_proxy_list) {
+    if (!client) return false;
+
+    if (!no_proxy_list || no_proxy_list[0] == '\0') {
+        free(client->no_proxy);
+        client->no_proxy = NULL;
+        return true;
+    }
+
+    char* copy = strdup(no_proxy_list);
+    if (!copy) return false;
+
+    free(client->no_proxy);
+    client->no_proxy = copy;
+    return true;
+}
+
 struct header_set {
     const char* const* headers;
     size_t count;
@@ -432,7 +451,7 @@ bool llm_health_with_headers(llm_client_t* client, const char* const* headers, s
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
     bool ok = http_get(url, client->timeout.connect_timeout_ms, 1024, header_set.headers, header_set.count, tls_ptr,
-                       client->proxy_url, &body, &len);
+                       client->proxy_url, client->no_proxy, &body, &len);
     header_set_free(&header_set);
     free(body);
     return ok;
@@ -451,7 +470,7 @@ char** llm_models_list_with_headers(llm_client_t* client, size_t* count, const c
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
     if (!http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, header_set.headers,
-                  header_set.count, tls_ptr, client->proxy_url, &body, &len)) {
+                  header_set.count, tls_ptr, client->proxy_url, client->no_proxy, &body, &len)) {
         header_set_free(&header_set);
         return NULL;
     }
@@ -520,7 +539,7 @@ bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t*
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
     bool ok = http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, header_set.headers,
-                       header_set.count, tls_ptr, client->proxy_url, (char**)json, len);
+                       header_set.count, tls_ptr, client->proxy_url, client->no_proxy, (char**)json, len);
     header_set_free(&header_set);
     return ok;
 }
@@ -552,9 +571,9 @@ bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
-    bool ok =
-        http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
-                  header_set.headers, header_set.count, tls_ptr, client->proxy_url, &response_body, &response_len);
+    bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
+                        header_set.headers, header_set.count, tls_ptr, client->proxy_url, client->no_proxy,
+                        &response_body, &response_len);
     header_set_free(&header_set);
     free(request_json);
 
@@ -603,9 +622,9 @@ bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, 
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
-    bool ok =
-        http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
-                  header_set.headers, header_set.count, tls_ptr, client->proxy_url, &response_body, &response_len);
+    bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
+                        header_set.headers, header_set.count, tls_ptr, client->proxy_url, client->no_proxy,
+                        &response_body, &response_len);
     header_set_free(&header_set);
     free(request_json);
 
@@ -722,9 +741,9 @@ bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* mes
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
-    bool ok =
-        http_post_stream(url, request_json, client->timeout.overall_timeout_ms, client->timeout.read_idle_timeout_ms,
-                         header_set.headers, header_set.count, tls_ptr, client->proxy_url, curl_stream_cb, &cs);
+    bool ok = http_post_stream(url, request_json, client->timeout.overall_timeout_ms,
+                               client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
+                               client->proxy_url, client->no_proxy, curl_stream_cb, &cs);
     header_set_free(&header_set);
 
     for (size_t i = 0; i < ctx.accums_count; i++) {

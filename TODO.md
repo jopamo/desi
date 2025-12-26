@@ -66,7 +66,7 @@ The library is functional end-to-end, but the remaining work is about:
     - missing key yields expected server error parse
     - header injection does not corrupt framing
 
-- [ ] **Proxy configuration**
+- [x] **Proxy configuration**
   - Explicit proxy URL support
   - Explicit no-proxy list support
   - No auto-detection

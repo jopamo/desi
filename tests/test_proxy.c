@@ -306,7 +306,7 @@ int main(void) {
     target_pid = fork();
     if (target_pid == 0) {
         close(proxy_listener);
-        server_loop(target_listener, "target", 1);
+        server_loop(target_listener, "target", 2);
     } else if (target_pid < 0) {
         fprintf(stderr, "Failed to fork target server\n");
         close(target_listener);
@@ -337,8 +337,8 @@ int main(void) {
 
     setenv("http_proxy", proxy_url, 1);
     setenv("HTTP_PROXY", proxy_url, 1);
-    unsetenv("no_proxy");
-    unsetenv("NO_PROXY");
+    setenv("no_proxy", "127.0.0.1", 1);
+    setenv("NO_PROXY", "127.0.0.1", 1);
 
     llm_model_t model = {"test-model"};
     client = llm_client_create(base_url, &model, NULL, NULL);
@@ -384,11 +384,37 @@ int main(void) {
     free((void*)props);
     props = NULL;
 
+    if (!llm_client_set_no_proxy(client, "127.0.0.1")) {
+        fprintf(stderr, "Failed to set no-proxy list\n");
+        ok = false;
+        goto cleanup;
+    }
+
+    if (!llm_props_get(client, &props, &props_len)) {
+        fprintf(stderr, "Props request with no-proxy failed\n");
+        ok = false;
+        goto cleanup;
+    }
+    if (!json_expect_source(props, props_len, "target")) {
+        fprintf(stderr, "Expected no-proxy request to hit target\n");
+        free((void*)props);
+        ok = false;
+        goto cleanup;
+    }
+    free((void*)props);
+    props = NULL;
+
+    if (!llm_client_set_no_proxy(client, NULL)) {
+        fprintf(stderr, "Failed to clear no-proxy list\n");
+        ok = false;
+        goto cleanup;
+    }
+
     char post_url[256];
     snprintf(post_url, sizeof(post_url), "%s/post", base_url);
     char* body = NULL;
     size_t body_len = 0;
-    if (!http_post(post_url, "{}", 1000, 1024, NULL, 0, NULL, proxy_url, &body, &body_len)) {
+    if (!http_post(post_url, "{}", 1000, 1024, NULL, 0, NULL, proxy_url, NULL, &body, &body_len)) {
         fprintf(stderr, "http_post via proxy failed\n");
         ok = false;
         goto cleanup;
@@ -405,7 +431,7 @@ int main(void) {
     char stream_url[256];
     snprintf(stream_url, sizeof(stream_url), "%s/stream", base_url);
     struct stream_capture cap = {0};
-    if (!http_post_stream(stream_url, "{}", 1000, 1000, NULL, 0, NULL, proxy_url, on_stream_chunk, &cap) ||
+    if (!http_post_stream(stream_url, "{}", 1000, 1000, NULL, 0, NULL, proxy_url, NULL, on_stream_chunk, &cap) ||
         cap.failed || !cap.data) {
         fprintf(stderr, "http_post_stream via proxy failed\n");
         ok = false;

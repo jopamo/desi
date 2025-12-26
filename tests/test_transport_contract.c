@@ -20,6 +20,8 @@ struct fake_transport_state {
     const char* expected_url;
     const char* const* expected_headers;
     size_t expected_headers_count;
+    const char* expected_proxy_url;
+    const char* expected_no_proxy;
     const char* response_get;
     const char* response_post;
     char* last_body;
@@ -34,6 +36,7 @@ struct fake_transport_state {
     bool called_post;
     bool called_stream;
     bool headers_ok;
+    bool proxy_ok;
     size_t stream_cb_calls;
 };
 
@@ -53,6 +56,16 @@ static bool check_headers(const char* const* headers, size_t headers_count) {
     if (!headers || headers_count < g_fake.expected_headers_count) return false;
     for (size_t i = 0; i < g_fake.expected_headers_count; i++) {
         if (!header_list_contains(headers, headers_count, g_fake.expected_headers[i])) return false;
+    }
+    return true;
+}
+
+static bool check_proxy(const char* proxy_url, const char* no_proxy) {
+    if (g_fake.expected_proxy_url) {
+        if (!proxy_url || strcmp(proxy_url, g_fake.expected_proxy_url) != 0) return false;
+    }
+    if (g_fake.expected_no_proxy) {
+        if (!no_proxy || strcmp(no_proxy, g_fake.expected_no_proxy) != 0) return false;
     }
     return true;
 }
@@ -86,14 +99,15 @@ cleanup:
 }
 
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, char** body, size_t* len) {
+              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
+              char** body, size_t* len) {
     (void)timeout_ms;
     (void)max_response_bytes;
     (void)tls;
-    (void)proxy_url;
 
     g_fake.called_get = true;
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
+    g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
         g_fake.headers_ok = false;
     }
@@ -121,15 +135,15 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
 bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
                const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               char** body, size_t* len) {
+               const char* no_proxy, char** body, size_t* len) {
     (void)json_body;
     (void)timeout_ms;
     (void)max_response_bytes;
     (void)tls;
-    (void)proxy_url;
 
     g_fake.called_post = true;
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
+    g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
         g_fake.headers_ok = false;
     }
@@ -157,15 +171,15 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
 
 bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
                       const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, stream_cb cb, void* user_data) {
+                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data) {
     (void)json_body;
     (void)timeout_ms;
     (void)read_idle_timeout_ms;
     (void)tls;
-    (void)proxy_url;
 
     g_fake.called_stream = true;
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
+    g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
         g_fake.headers_ok = false;
     }
@@ -315,6 +329,28 @@ static bool test_contract_streaming_headers(void) {
     return true;
 }
 
+static bool test_contract_proxy_passthrough(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.proxy_ok = true;
+    g_fake.expected_url = "http://fake/health";
+    g_fake.response_get = "{\"ok\":true}";
+    g_fake.expected_proxy_url = "http://proxy.local:8080";
+    g_fake.expected_no_proxy = "127.0.0.1,localhost";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+    if (!require(llm_client_set_proxy(client, g_fake.expected_proxy_url), "set proxy failed")) return false;
+    if (!require(llm_client_set_no_proxy(client, g_fake.expected_no_proxy), "set no-proxy failed")) return false;
+
+    bool ok = llm_health(client);
+    if (!require(ok, "llm_health failed")) return false;
+    if (!require(g_fake.proxy_ok, "proxy config not passed through")) return false;
+
+    llm_client_destroy(client);
+    return true;
+}
+
 static bool test_contract_failure_propagation(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -404,6 +440,7 @@ int main(void) {
     if (!test_contract_completions_missing_choices()) return 1;
     if (!test_contract_body_ownership()) return 1;
     if (!test_contract_streaming_headers()) return 1;
+    if (!test_contract_proxy_passthrough()) return 1;
     if (!test_contract_failure_propagation()) return 1;
     printf("Transport contract tests passed.\n");
     return 0;

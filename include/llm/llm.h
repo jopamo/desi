@@ -147,6 +147,8 @@ bool llm_client_set_api_key(llm_client_t* client, const char* api_key);
 bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls);
 // Copies proxy URL into the client. Pass NULL or empty to clear.
 bool llm_client_set_proxy(llm_client_t* client, const char* proxy_url);
+// Copies no-proxy list into the client. Pass NULL or empty to clear.
+bool llm_client_set_no_proxy(llm_client_t* client, const char* no_proxy_list);
 
 // Health check
 bool llm_health(llm_client_t* client);

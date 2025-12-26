@@ -92,12 +92,19 @@ static bool apply_tls_config(CURL* curl, const llm_tls_config_t* tls, char* key_
     return true;
 }
 
-static void apply_proxy_config(CURL* curl, const char* proxy_url) {
+static void apply_proxy_config(CURL* curl, const char* proxy_url, const char* no_proxy) {
     if (proxy_url && proxy_url[0]) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url);
     } else {
         // Empty string disables libcurl environment proxy lookup.
         curl_easy_setopt(curl, CURLOPT_PROXY, "");
+    }
+
+    if (no_proxy && no_proxy[0]) {
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, no_proxy);
+    } else {
+        // Empty string disables libcurl environment no_proxy lookup.
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
     }
 }
 
@@ -111,7 +118,8 @@ static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, char** body, size_t* len) {
+              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
+              char** body, size_t* len) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -131,7 +139,7 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
         memset(key_pass_buf, 0, sizeof(key_pass_buf));
         return false;
     }
-    apply_proxy_config(curl, proxy_url);
+    apply_proxy_config(curl, proxy_url, no_proxy);
     if (header_list) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     }
@@ -165,7 +173,7 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
 bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
                const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               char** body, size_t* len) {
+               const char* no_proxy, char** body, size_t* len) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -186,7 +194,7 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
         memset(key_pass_buf, 0, sizeof(key_pass_buf));
         return false;
     }
-    apply_proxy_config(curl, proxy_url);
+    apply_proxy_config(curl, proxy_url, no_proxy);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
@@ -227,7 +235,7 @@ static size_t stream_write_cb(void* ptr, size_t size, size_t nmemb, void* userda
 
 bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
                       const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, stream_cb cb, void* user_data) {
+                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
@@ -248,7 +256,7 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
         memset(key_pass_buf, 0, sizeof(key_pass_buf));
         return false;
     }
-    apply_proxy_config(curl, proxy_url);
+    apply_proxy_config(curl, proxy_url, no_proxy);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
