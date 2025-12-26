@@ -10,6 +10,8 @@ struct tool_call_accumulator {
     char* id;
     char* name;
     struct growbuf args_buf;
+    bool active;
+    bool saw_args;
     bool frozen;
 };
 

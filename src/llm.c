@@ -8,6 +8,7 @@
 #include "transport_curl.h"
 #define JSTOK_HEADER
 #include <jstok.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -849,10 +850,59 @@ struct stream_ctx {
     struct tool_call_accumulator* accums;
     size_t accums_count;
     size_t max_tool_args;
+    bool tool_calls_finalized;
+    bool protocol_error;
 };
+
+static bool unescape_json_string_inplace(char* buf, size_t len, size_t* out_len) {
+    if (!buf || !out_len) return false;
+    if (len > (size_t)INT_MAX) return false;
+
+    jstoktok_t tok;
+    memset(&tok, 0, sizeof(tok));
+    tok.type = JSTOK_STRING;
+    tok.start = 0;
+    tok.end = (int)len;
+
+    size_t unescaped_len = 0;
+    if (jstok_unescape(buf, &tok, buf, len, &unescaped_len) != 0) return false;
+    *out_len = unescaped_len;
+    return true;
+}
+
+static bool validate_json_span(const char* json, size_t len) {
+    if (!json || len == 0 || len > (size_t)INT_MAX) return false;
+
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    return needed > 0;
+}
+
+static bool finalize_tool_calls(struct stream_ctx* ctx) {
+    if (ctx->tool_calls_finalized) return true;
+    ctx->tool_calls_finalized = true;
+
+    for (size_t i = 0; i < ctx->accums_count; i++) {
+        struct tool_call_accumulator* acc = &ctx->accums[i];
+        if (!acc->active) continue;
+        acc->frozen = true;
+        if (!acc->saw_args) return false;
+        size_t unescaped_len = 0;
+        if (!unescape_json_string_inplace(acc->args_buf.data, acc->args_buf.len, &unescaped_len)) return false;
+        acc->args_buf.len = unescaped_len;
+        if (!validate_json_span(acc->args_buf.data, acc->args_buf.len)) return false;
+        if (ctx->callbacks && ctx->callbacks->on_tool_args_complete) {
+            ctx->callbacks->on_tool_args_complete(ctx->callbacks->user_data, i, acc->args_buf.data, acc->args_buf.len);
+        }
+    }
+
+    return true;
+}
 
 static void on_sse_data(void* user_data, span_t line) {
     struct stream_ctx* ctx = user_data;
+    if (ctx->protocol_error) return;
     llm_chat_chunk_delta_t delta;
     if (parse_chat_chunk_choice(line.ptr, line.len, ctx->choice_index, &delta) == 0) {
         if (delta.content_delta && ctx->callbacks->on_content_delta) {
@@ -867,7 +917,14 @@ static void on_sse_data(void* user_data, span_t line) {
                 llm_tool_call_delta_t* td = &delta.tool_call_deltas[i];
                 if (td->index >= ctx->accums_count) {
                     size_t new_count = td->index + 1;
-                    ctx->accums = realloc(ctx->accums, new_count * sizeof(struct tool_call_accumulator));
+                    struct tool_call_accumulator* next =
+                        realloc(ctx->accums, new_count * sizeof(struct tool_call_accumulator));
+                    if (!next) {
+                        ctx->protocol_error = true;
+                        free(delta.tool_call_deltas);
+                        return;
+                    }
+                    ctx->accums = next;
                     for (size_t j = ctx->accums_count; j < new_count; j++) {
                         accum_init(&ctx->accums[j]);
                     }
@@ -876,15 +933,29 @@ static void on_sse_data(void* user_data, span_t line) {
                 if (ctx->callbacks->on_tool_call_delta) {
                     ctx->callbacks->on_tool_call_delta(ctx->callbacks->user_data, td);
                 }
-                accum_feed_delta(&ctx->accums[td->index], td, ctx->max_tool_args);
+                bool accum_ok = accum_feed_delta(&ctx->accums[td->index], td, ctx->max_tool_args);
                 if (td->arguments_fragment && ctx->callbacks->on_tool_args_fragment) {
                     ctx->callbacks->on_tool_args_fragment(ctx->callbacks->user_data, td->index, td->arguments_fragment,
                                                           td->arguments_fragment_len);
                 }
+                if (!accum_ok) {
+                    ctx->protocol_error = true;
+                    free(delta.tool_call_deltas);
+                    return;
+                }
             }
         }
-        if (delta.finish_reason != LLM_FINISH_REASON_UNKNOWN && ctx->callbacks->on_finish_reason) {
-            ctx->callbacks->on_finish_reason(ctx->callbacks->user_data, delta.finish_reason);
+        if (delta.finish_reason != LLM_FINISH_REASON_UNKNOWN) {
+            if (delta.finish_reason == LLM_FINISH_REASON_TOOL_CALLS) {
+                if (!finalize_tool_calls(ctx)) {
+                    ctx->protocol_error = true;
+                    free(delta.tool_call_deltas);
+                    return;
+                }
+            }
+            if (ctx->callbacks->on_finish_reason) {
+                ctx->callbacks->on_finish_reason(ctx->callbacks->user_data, delta.finish_reason);
+            }
         }
         free(delta.tool_call_deltas);
     }
@@ -898,11 +969,13 @@ typedef struct {
 
 static bool curl_stream_cb(const char* chunk, size_t len, void* user_data) {
     curl_stream_ctx* cs = user_data;
+    if (cs->ctx->protocol_error) return false;
     int rc = sse_feed(cs->sse, chunk, len);
     if (rc != SSE_OK) {
         cs->sse_error = rc;
         return false;
     }
+    if (cs->ctx->protocol_error) return false;
     return true;
 }
 
@@ -922,7 +995,9 @@ static bool llm_chat_stream_with_headers_choice(llm_client_t* client, const llm_
                              .choice_index = choice_index,
                              .accums = NULL,
                              .accums_count = 0,
-                             .max_tool_args = client->limits.max_tool_args_bytes_per_call};
+                             .max_tool_args = client->limits.max_tool_args_bytes_per_call,
+                             .tool_calls_finalized = false,
+                             .protocol_error = false};
     sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_frame_bytes,
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     sse_set_callback(sse, on_sse_data, &ctx);
@@ -941,6 +1016,15 @@ static bool llm_chat_stream_with_headers_choice(llm_client_t* client, const llm_
                                client->proxy_url, client->no_proxy, curl_stream_cb, &cs);
     header_set_free(&header_set);
     if (cs.sse_error != SSE_OK) {
+        ok = false;
+    }
+    if (ok && !ctx.tool_calls_finalized && sse_is_done(sse)) {
+        if (!finalize_tool_calls(&ctx)) {
+            ctx.protocol_error = true;
+            ok = false;
+        }
+    }
+    if (ctx.protocol_error) {
         ok = false;
     }
 

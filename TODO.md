@@ -36,7 +36,7 @@ Remaining work is about:
 
 ### Tasks
 
-* [ ] **Final tool aggregation callback**
+* [x] **Final tool aggregation callback**
 
   * When a tool call completes:
 

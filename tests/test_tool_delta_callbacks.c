@@ -119,6 +119,10 @@ struct tool_delta_capture {
     size_t args_len;
     char args_frag[256];
     size_t args_frag_len;
+    size_t final_calls;
+    size_t final_indices[4];
+    char final_args[256];
+    size_t final_args_len;
     bool overflow;
 };
 
@@ -168,6 +172,17 @@ static void on_tool_args_fragment(void* user_data, size_t tool_index, const char
     (void)tool_index;
     cap->args_calls++;
     if (!append_fragment(cap->args_frag, sizeof(cap->args_frag), &cap->args_frag_len, fragment, len)) {
+        cap->overflow = true;
+    }
+}
+
+static void on_tool_args_complete(void* user_data, size_t tool_index, const char* args_json, size_t len) {
+    struct tool_delta_capture* cap = user_data;
+    if (cap->final_calls < 4) {
+        cap->final_indices[cap->final_calls] = tool_index;
+    }
+    cap->final_calls++;
+    if (!append_fragment(cap->final_args, sizeof(cap->final_args), &cap->final_args_len, args_json, len)) {
         cap->overflow = true;
     }
 }
@@ -373,6 +388,7 @@ int main(void) {
     cbs.user_data = &cap;
     cbs.on_tool_call_delta = on_tool_delta;
     cbs.on_tool_args_fragment = on_tool_args_fragment;
+    cbs.on_tool_args_complete = on_tool_args_complete;
 
     if (!require(llm_chat_stream(client, messages, 1, NULL, NULL, NULL, &cbs), "stream chat")) {
         llm_client_destroy(client);
@@ -458,6 +474,71 @@ int main(void) {
 
     free(tokens);
     free(unescaped);
+    tokens = NULL;
+    count = 0;
+
+    if (!require(cap.final_calls == 1, "final args callback count")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(cap.final_indices[0] == 0, "final args index")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    const char* expected_final = "{\"a\":1,\"note\":\"hi\\nthere\"}";
+    if (!require(cap.final_args_len == strlen(expected_final) &&
+                     memcmp(cap.final_args, expected_final, cap.final_args_len) == 0,
+                 "final args json")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(parse_json_tokens(cap.final_args, cap.final_args_len, &tokens, &count), "parse final args")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(tokens[0].type == JSTOK_OBJECT, "final args object")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(json_expect_number(cap.final_args, tokens, count, 0, "a", 1), "final args a")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(json_expect_string(cap.final_args, tokens, count, 0, "note", "hi\\nthere"), "final args note")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    free(tokens);
+
+    fake_reset();
+    const char* bad_stream_payload =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\","
+        "\"function\":{\"name\":\"ping\",\"arguments\":\"{\\\"a\\\":}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    g_fake.stream_payload = bad_stream_payload;
+    g_fake.stream_payload_len = strlen(bad_stream_payload);
+    g_fake.stream_chunk_size = 5;
+
+    struct tool_delta_capture bad_cap = {0};
+    llm_stream_callbacks_t bad_cbs = {0};
+    bad_cbs.user_data = &bad_cap;
+    bad_cbs.on_tool_call_delta = on_tool_delta;
+    bad_cbs.on_tool_args_fragment = on_tool_args_fragment;
+    bad_cbs.on_tool_args_complete = on_tool_args_complete;
+
+    if (llm_chat_stream(client, messages, 1, NULL, NULL, NULL, &bad_cbs)) {
+        fprintf(stderr, "Invalid tool args should fail\n");
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(bad_cap.final_calls == 0, "final args callback on invalid args")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+
     llm_client_destroy(client);
 
     printf("Tool delta callbacks test passed.\n");

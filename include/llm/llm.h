@@ -150,6 +150,7 @@ typedef struct {
     void (*on_reasoning_delta)(void* user_data, const char* delta, size_t len);
     void (*on_tool_args_fragment)(void* user_data, size_t tool_index, const char* fragment, size_t len);
     void (*on_tool_call_delta)(void* user_data, const llm_tool_call_delta_t* delta);
+    void (*on_tool_args_complete)(void* user_data, size_t tool_index, const char* args_json, size_t len);
     void (*on_finish_reason)(void* user_data, llm_finish_reason_t reason);
 } llm_stream_callbacks_t;
 

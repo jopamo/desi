@@ -7,6 +7,8 @@ void accum_init(struct tool_call_accumulator* acc) {
     acc->id = NULL;
     acc->name = NULL;
     growbuf_init(&acc->args_buf, 1024);
+    acc->active = false;
+    acc->saw_args = false;
     acc->frozen = false;
 }
 
@@ -28,6 +30,7 @@ static char* strdup_span(const char* ptr, size_t len) {
 
 bool accum_feed_delta(struct tool_call_accumulator* acc, const llm_tool_call_delta_t* delta, size_t max_args_bytes) {
     if (acc->frozen) return false;
+    acc->active = true;
 
     if (!acc->id && delta->id) {
         acc->id = strdup_span(delta->id, delta->id_len);
@@ -36,6 +39,7 @@ bool accum_feed_delta(struct tool_call_accumulator* acc, const llm_tool_call_del
         acc->name = strdup_span(delta->name, delta->name_len);
     }
     if (delta->arguments_fragment) {
+        acc->saw_args = true;
         if (!growbuf_append(&acc->args_buf, delta->arguments_fragment, delta->arguments_fragment_len, max_args_bytes)) {
             return false;
         }
