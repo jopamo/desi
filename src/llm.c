@@ -555,12 +555,15 @@ bool llm_props_get(llm_client_t* client, const char** json, size_t* len) {
 
 // Forward declarations from other modules
 int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result);
-int parse_chat_chunk(const char* json, size_t len, llm_chat_chunk_delta_t* delta);
-int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, llm_chat_chunk_delta_t* delta);
+int parse_chat_chunk(const char* json, size_t len, llm_chat_chunk_delta_t* delta, llm_usage_t* usage,
+                     bool* usage_present);
+int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, llm_chat_chunk_delta_t* delta,
+                            llm_usage_t* usage, bool* usage_present);
 int parse_completions_response(const char* json, size_t len, llm_completions_result_t* result);
-int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason);
+int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason,
+                            llm_usage_t* usage, bool* usage_present);
 int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_index, span_t* text_delta,
-                                   llm_finish_reason_t* finish_reason);
+                                   llm_finish_reason_t* finish_reason, llm_usage_t* usage, bool* usage_present);
 int parse_embeddings_response(const char* json, size_t len, llm_embeddings_result_t* result);
 
 bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
@@ -568,7 +571,7 @@ bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
-    char* request_json = build_completions_request(client->model.name, prompt, prompt_len, false, params_json);
+    char* request_json = build_completions_request(client->model.name, prompt, prompt_len, false, false, params_json);
     if (!request_json) return false;
 
     char* response_body = NULL;
@@ -615,15 +618,22 @@ void llm_completions_free(llm_completions_result_t* result) {
 struct completions_stream_ctx {
     const llm_stream_callbacks_t* callbacks;
     size_t choice_index;
+    bool include_usage;
 };
 
 static void on_sse_completions_data(void* user_data, span_t line) {
     struct completions_stream_ctx* ctx = user_data;
     span_t text_delta = {0};
     llm_finish_reason_t finish_reason = LLM_FINISH_REASON_UNKNOWN;
-    if (parse_completions_chunk_choice(line.ptr, line.len, ctx->choice_index, &text_delta, &finish_reason) == 0) {
+    llm_usage_t usage;
+    bool usage_present = false;
+    if (parse_completions_chunk_choice(line.ptr, line.len, ctx->choice_index, &text_delta, &finish_reason, &usage,
+                                       &usage_present) == 0) {
         if (text_delta.ptr && ctx->callbacks->on_content_delta) {
             ctx->callbacks->on_content_delta(ctx->callbacks->user_data, text_delta.ptr, text_delta.len);
+        }
+        if (ctx->include_usage && usage_present && ctx->callbacks->on_usage) {
+            ctx->callbacks->on_usage(ctx->callbacks->user_data, &usage);
         }
         if (finish_reason != LLM_FINISH_REASON_UNKNOWN && ctx->callbacks->on_finish_reason) {
             ctx->callbacks->on_finish_reason(ctx->callbacks->user_data, finish_reason);
@@ -684,10 +694,12 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(llm_client_t* c
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
-    char* request_json = build_completions_request(client->model.name, prompt, prompt_len, true, params_json);
+    const bool include_usage = callbacks && callbacks->include_usage;
+    char* request_json =
+        build_completions_request(client->model.name, prompt, prompt_len, true, include_usage, params_json);
     if (!request_json) return LLM_ERR_FAILED;
 
-    struct completions_stream_ctx ctx = {callbacks, choice_index};
+    struct completions_stream_ctx ctx = {callbacks, choice_index, include_usage};
     sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_frame_bytes,
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     if (!sse) {
@@ -844,7 +856,7 @@ bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, 
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
-    char* request_json = build_chat_request(client->model.name, messages, messages_count, false, params_json,
+    char* request_json = build_chat_request(client->model.name, messages, messages_count, false, false, params_json,
                                             tooling_json, response_format_json);
     if (!request_json) return false;
 
@@ -929,6 +941,7 @@ struct stream_ctx {
     size_t accums_count;
     size_t max_tool_args;
     bool tool_calls_finalized;
+    bool include_usage;
     bool protocol_error;
     llm_abort_cb abort_cb;
     void* abort_user_data;
@@ -1000,13 +1013,18 @@ static void on_sse_data(void* user_data, span_t line) {
     struct stream_ctx* ctx = user_data;
     if (ctx->protocol_error) return;
     llm_chat_chunk_delta_t delta;
-    if (parse_chat_chunk_choice(line.ptr, line.len, ctx->choice_index, &delta) == 0) {
+    llm_usage_t usage;
+    bool usage_present = false;
+    if (parse_chat_chunk_choice(line.ptr, line.len, ctx->choice_index, &delta, &usage, &usage_present) == 0) {
         if (delta.content_delta && ctx->callbacks->on_content_delta) {
             ctx->callbacks->on_content_delta(ctx->callbacks->user_data, delta.content_delta, delta.content_delta_len);
         }
         if (delta.reasoning_delta && ctx->callbacks->on_reasoning_delta) {
             ctx->callbacks->on_reasoning_delta(ctx->callbacks->user_data, delta.reasoning_delta,
                                                delta.reasoning_delta_len);
+        }
+        if (ctx->include_usage && usage_present && ctx->callbacks->on_usage) {
+            ctx->callbacks->on_usage(ctx->callbacks->user_data, &usage);
         }
         if (delta.tool_call_deltas_count > 0) {
             for (size_t i = 0; i < delta.tool_call_deltas_count; i++) {
@@ -1111,8 +1129,9 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
-    char* request_json = build_chat_request(client->model.name, messages, messages_count, true, params_json,
-                                            tooling_json, response_format_json);
+    const bool include_usage = callbacks && callbacks->include_usage;
+    char* request_json = build_chat_request(client->model.name, messages, messages_count, true, include_usage,
+                                            params_json, tooling_json, response_format_json);
     if (!request_json) return LLM_ERR_FAILED;
 
     struct stream_ctx ctx = {.callbacks = callbacks,
@@ -1121,6 +1140,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                              .accums_count = 0,
                              .max_tool_args = client->limits.max_tool_args_bytes_per_call,
                              .tool_calls_finalized = false,
+                             .include_usage = include_usage,
                              .protocol_error = false,
                              .abort_cb = abort_cb,
                              .abort_user_data = abort_user_data,

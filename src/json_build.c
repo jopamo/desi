@@ -60,7 +60,8 @@ static void append_json_raw(struct growbuf* b, const char* json, size_t len) {
 // For now they are only used in this file or can be made available to others if needed.
 
 char* build_chat_request(const char* model, const llm_message_t* messages, size_t messages_count, bool stream,
-                         const char* params_json, const char* tooling_json, const char* response_format_json) {
+                         bool include_usage, const char* params_json, const char* tooling_json,
+                         const char* response_format_json) {
     struct growbuf b;
     growbuf_init(&b, 4096);
 
@@ -117,6 +118,9 @@ char* build_chat_request(const char* model, const llm_message_t* messages, size_
 
     if (stream) {
         append_lit(&b, ",\"stream\":true");
+        if (include_usage) {
+            append_lit(&b, ",\"stream_options\":{\"include_usage\":true}");
+        }
     }
 
     if (params_json) {
@@ -164,7 +168,7 @@ char* build_chat_request(const char* model, const llm_message_t* messages, size_
 }
 
 char* build_completions_request(const char* model, const char* prompt, size_t prompt_len, bool stream,
-                                const char* params_json) {
+                                bool include_usage, const char* params_json) {
     struct growbuf b;
     growbuf_init(&b, 4096);
 
@@ -175,6 +179,9 @@ char* build_completions_request(const char* model, const char* prompt, size_t pr
 
     if (stream) {
         append_lit(&b, ",\"stream\":true");
+        if (include_usage) {
+            append_lit(&b, ",\"stream_options\":{\"include_usage\":true}");
+        }
     }
 
     if (params_json) {

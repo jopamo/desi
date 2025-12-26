@@ -119,6 +119,24 @@ if get_option('tests')
   )
   test('tool_deltas', test_tool_deltas)
 
+  test_stream_usage = executable('test_stream_usage',
+    'tests/test_stream_usage.c',
+    'src/llm.c',
+    'src/jstok_impl.c',
+    'src/json_core.c',
+    'src/json_build.c',
+    'src/protocol_chat.c',
+    'src/protocol_completions.c',
+    'src/protocol_embeddings.c',
+    'src/sse.c',
+    'src/tools_accum.c',
+    'src/tools_loop.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [jstok_dep],
+    install: false,
+  )
+  test('stream_usage', test_stream_usage)
+
   test_auth = executable('test_auth',
     'tests/test_auth.c',
     include_directories: [inc, include_directories('src')],

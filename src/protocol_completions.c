@@ -3,6 +3,8 @@
 #include "llm/llm.h"
 #define JSTOK_HEADER
 #include <jstok.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,6 +29,48 @@ static int tokenize(const char* json, size_t len, jstoktok_t** tokens_out, int* 
 }
 
 static void free_tokens(jstoktok_t* tokens) { free(tokens); }
+
+static void usage_init(llm_usage_t* usage, bool* usage_present) {
+    if (usage) {
+        memset(usage, 0, sizeof(*usage));
+    }
+    if (usage_present) {
+        *usage_present = false;
+    }
+}
+
+static void usage_parse_field(const char* json, const jstoktok_t* token, size_t* out, bool* has_value) {
+    long long val = 0;
+    if (!json || !token || !out || !has_value) return;
+    if (token->type != JSTOK_PRIMITIVE) return;
+    if (jstok_atoi64(json, token, &val) != 0) return;
+    if (val < 0) return;
+    if ((unsigned long long)val > SIZE_MAX) return;
+    *out = (size_t)val;
+    *has_value = true;
+}
+
+static void usage_parse(const char* json, const jstoktok_t* tokens, int count, llm_usage_t* usage,
+                        bool* usage_present) {
+    if (!usage || !usage_present) return;
+    usage_init(usage, usage_present);
+    int usage_idx = obj_get_key(tokens, count, 0, json, "usage");
+    if (usage_idx < 0 || tokens[usage_idx].type != JSTOK_OBJECT) return;
+    *usage_present = true;
+
+    int prompt_idx = obj_get_key(tokens, count, usage_idx, json, "prompt_tokens");
+    if (prompt_idx >= 0) {
+        usage_parse_field(json, &tokens[prompt_idx], &usage->prompt_tokens, &usage->has_prompt_tokens);
+    }
+    int completion_idx = obj_get_key(tokens, count, usage_idx, json, "completion_tokens");
+    if (completion_idx >= 0) {
+        usage_parse_field(json, &tokens[completion_idx], &usage->completion_tokens, &usage->has_completion_tokens);
+    }
+    int total_idx = obj_get_key(tokens, count, usage_idx, json, "total_tokens");
+    if (total_idx >= 0) {
+        usage_parse_field(json, &tokens[total_idx], &usage->total_tokens, &usage->has_total_tokens);
+    }
+}
 
 int parse_completions_response(const char* json, size_t len, llm_completions_result_t* result) {
     jstoktok_t* tokens = NULL;
@@ -115,7 +159,7 @@ static int find_choice_token(const char* json, const jstoktok_t* tokens, int cou
 }
 
 int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_index, span_t* text_delta,
-                                   llm_finish_reason_t* finish_reason) {
+                                   llm_finish_reason_t* finish_reason, llm_usage_t* usage, bool* usage_present) {
     jstoktok_t* tokens = NULL;
     int count = 0;
     int ret = tokenize(json, len, &tokens, &count);
@@ -133,6 +177,8 @@ int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_i
         free_tokens(tokens);
         return -1;
     }
+
+    usage_parse(json, tokens, count, usage, usage_present);
 
     int choices_idx = obj_get_key(tokens, count, 0, json, "choices");
     if (choices_idx >= 0 && tokens[choices_idx].type == JSTOK_ARRAY && tokens[choices_idx].size > 0) {
@@ -161,6 +207,7 @@ int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_i
     return 0;
 }
 
-int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason) {
-    return parse_completions_chunk_choice(json, len, 0, text_delta, finish_reason);
+int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason,
+                            llm_usage_t* usage, bool* usage_present) {
+    return parse_completions_chunk_choice(json, len, 0, text_delta, finish_reason, usage, usage_present);
 }

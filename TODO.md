@@ -64,7 +64,7 @@ Remaining work is about:
   * No signals
     No threads
 
-* [ ] **Streaming usage support**
+* [x] **Streaming usage support**
 
   * Support `include_usage` only as an explicit request option
   * Add tests for:

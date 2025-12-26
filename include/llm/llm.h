@@ -156,6 +156,15 @@ typedef struct {
     llm_finish_reason_t finish_reason;  // may be UNKNOWN
 } llm_chat_chunk_delta_t;
 
+typedef struct {
+    size_t prompt_tokens;
+    size_t completion_tokens;
+    size_t total_tokens;
+    bool has_prompt_tokens;
+    bool has_completion_tokens;
+    bool has_total_tokens;
+} llm_usage_t;
+
 // Streaming callbacks
 typedef struct {
     void* user_data;
@@ -164,7 +173,9 @@ typedef struct {
     void (*on_tool_args_fragment)(void* user_data, size_t tool_index, const char* fragment, size_t len);
     void (*on_tool_call_delta)(void* user_data, const llm_tool_call_delta_t* delta);
     void (*on_tool_args_complete)(void* user_data, size_t tool_index, const char* args_json, size_t len);
+    void (*on_usage)(void* user_data, const llm_usage_t* usage);
     void (*on_finish_reason)(void* user_data, llm_finish_reason_t reason);
+    bool include_usage;
 } llm_stream_callbacks_t;
 
 typedef bool (*llm_abort_cb)(void* user_data);
