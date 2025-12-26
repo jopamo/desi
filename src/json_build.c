@@ -157,7 +157,8 @@ char* build_chat_request(const char* model, const llm_message_t* messages, size_
     return b.data;
 }
 
-char* build_completions_request(const char* model, const char* prompt, size_t prompt_len, const char* params_json) {
+char* build_completions_request(const char* model, const char* prompt, size_t prompt_len, bool stream,
+                                const char* params_json) {
     struct growbuf b;
     growbuf_init(&b, 4096);
 
@@ -165,6 +166,10 @@ char* build_completions_request(const char* model, const char* prompt, size_t pr
     append_json_string(&b, model, strlen(model));
     append_lit(&b, ",\"prompt\":");
     append_json_string(&b, prompt, prompt_len);
+
+    if (stream) {
+        append_lit(&b, ",\"stream\":true");
+    }
 
     if (params_json) {
         size_t p_len = strlen(params_json);

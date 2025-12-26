@@ -176,6 +176,13 @@ bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size
                                   const char*** texts, size_t* count, const char* const* headers, size_t headers_count);
 void llm_completions_free(const char** texts, size_t count);
 
+// Completions (stream)
+bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                            const llm_stream_callbacks_t* callbacks);
+bool llm_completions_stream_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                         const char* params_json, const llm_stream_callbacks_t* callbacks,
+                                         const char* const* headers, size_t headers_count);
+
 // Chat non-stream
 bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
               const char* params_json,           // optional

@@ -48,13 +48,7 @@ int parse_completions_response(const char* json, size_t len, const char*** texts
     return 0;
 }
 
-// Internal structure for completion chunk delta
-typedef struct {
-    span_t text_delta;
-    llm_finish_reason_t finish_reason;
-} completions_chunk_delta_t;
-
-int parse_completions_chunk(const char* json, size_t len, completions_chunk_delta_t* delta) {
+int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason) {
     jstok_parser parser;
     jstok_init(&parser);
     int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
@@ -66,8 +60,13 @@ int parse_completions_chunk(const char* json, size_t len, completions_chunk_delt
     jstok_init(&parser);
     jstok_parse(&parser, json, (int)len, tokens, needed);
 
-    memset(delta, 0, sizeof(*delta));
-    delta->finish_reason = LLM_FINISH_REASON_UNKNOWN;
+    if (text_delta) {
+        text_delta->ptr = NULL;
+        text_delta->len = 0;
+    }
+    if (finish_reason) {
+        *finish_reason = LLM_FINISH_REASON_UNKNOWN;
+    }
 
     // Check for OpenAI error format? Assuming happy path or simple structure
     int choices_idx = jstok_object_get(json, tokens, needed, 0, "choices");
@@ -77,14 +76,18 @@ int parse_completions_chunk(const char* json, size_t len, completions_chunk_delt
             int text_idx = jstok_object_get(json, tokens, needed, choice_idx, "text");
             if (text_idx >= 0 && tokens[text_idx].type == JSTOK_STRING) {
                 jstok_span_t sp = jstok_span(json, &tokens[text_idx]);
-                delta->text_delta.ptr = sp.p;
-                delta->text_delta.len = sp.n;
+                if (text_delta) {
+                    text_delta->ptr = sp.p;
+                    text_delta->len = sp.n;
+                }
             }
 
             int finish_idx = jstok_object_get(json, tokens, needed, choice_idx, "finish_reason");
             if (finish_idx >= 0 && tokens[finish_idx].type == JSTOK_STRING) {
                 jstok_span_t sp = jstok_span(json, &tokens[finish_idx]);
-                delta->finish_reason = llm_finish_reason_from_string(sp.p, sp.n);
+                if (finish_reason) {
+                    *finish_reason = llm_finish_reason_from_string(sp.p, sp.n);
+                }
             }
         }
     }

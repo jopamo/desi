@@ -552,6 +552,7 @@ bool llm_props_get(llm_client_t* client, const char** json, size_t* len) {
 int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result);
 int parse_chat_chunk(const char* json, size_t len, llm_chat_chunk_delta_t* delta);
 int parse_completions_response(const char* json, size_t len, const char*** texts, size_t* count);
+int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason);
 
 bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
                                   const char*** texts, size_t* count, const char* const* headers,
@@ -559,7 +560,7 @@ bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
-    char* request_json = build_completions_request(client->model.name, prompt, prompt_len, params_json);
+    char* request_json = build_completions_request(client->model.name, prompt, prompt_len, false, params_json);
     if (!request_json) return false;
 
     char* response_body = NULL;
@@ -601,6 +602,70 @@ void llm_completions_free(const char** texts, size_t count) {
         }
         free(texts);
     }
+}
+
+struct completions_stream_ctx {
+    const llm_stream_callbacks_t* callbacks;
+};
+
+static void on_sse_completions_data(void* user_data, span_t line) {
+    struct completions_stream_ctx* ctx = user_data;
+    span_t text_delta = {0};
+    llm_finish_reason_t finish_reason = LLM_FINISH_REASON_UNKNOWN;
+    if (parse_completions_chunk(line.ptr, line.len, &text_delta, &finish_reason) == 0) {
+        if (text_delta.ptr && ctx->callbacks->on_content_delta) {
+            ctx->callbacks->on_content_delta(ctx->callbacks->user_data, text_delta.ptr, text_delta.len);
+        }
+        if (finish_reason != LLM_FINISH_REASON_UNKNOWN && ctx->callbacks->on_finish_reason) {
+            ctx->callbacks->on_finish_reason(ctx->callbacks->user_data, finish_reason);
+        }
+    }
+}
+
+struct sse_stream_ctx {
+    sse_parser_t* sse;
+};
+
+static void sse_stream_cb(const char* chunk, size_t len, void* user_data) {
+    struct sse_stream_ctx* cs = user_data;
+    sse_feed(cs->sse, chunk, len);
+}
+
+bool llm_completions_stream_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                         const char* params_json, const llm_stream_callbacks_t* callbacks,
+                                         const char* const* headers, size_t headers_count) {
+    char url[1024];
+    snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
+
+    char* request_json = build_completions_request(client->model.name, prompt, prompt_len, true, params_json);
+    if (!request_json) return false;
+
+    struct completions_stream_ctx ctx = {callbacks};
+    sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_response_bytes);
+    sse_set_callback(sse, on_sse_completions_data, &ctx);
+
+    struct sse_stream_ctx cs = {sse};
+    struct header_set header_set;
+    if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
+        sse_destroy(sse);
+        free(request_json);
+        return false;
+    }
+    llm_tls_config_t tls;
+    const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    bool ok = http_post_stream(url, request_json, client->timeout.overall_timeout_ms,
+                               client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
+                               client->proxy_url, client->no_proxy, sse_stream_cb, &cs);
+    header_set_free(&header_set);
+    sse_destroy(sse);
+    free(request_json);
+
+    return ok;
+}
+
+bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                            const llm_stream_callbacks_t* callbacks) {
+    return llm_completions_stream_with_headers(client, prompt, prompt_len, params_json, callbacks, NULL, 0);
 }
 
 bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,

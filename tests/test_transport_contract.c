@@ -329,6 +329,50 @@ static bool test_contract_streaming_headers(void) {
     return true;
 }
 
+static bool test_contract_completions_streaming_headers(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/completions";
+
+    static const char stream_sse[] =
+        "data: {\"choices\":[{\"text\":\"hi\",\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"text\":\"!\",\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    g_fake.stream_payload = stream_sse;
+    g_fake.stream_payload_len = strlen(stream_sse);
+    g_fake.stream_chunk_size = 12;
+
+    const char* client_headers[] = {"X-Client: alpha"};
+    llm_client_t* client = make_client("http://fake", client_headers, 1);
+    if (!require(client, "client create failed")) return false;
+    if (!require(llm_client_set_api_key(client, "token"), "set api key failed")) return false;
+
+    const char* request_headers[] = {"X-Request: beta"};
+    const char* expected_headers[] = {"X-Client: alpha", "Authorization: Bearer token", "X-Request: beta"};
+    g_fake.expected_headers = expected_headers;
+    g_fake.expected_headers_count = 3;
+
+    struct stream_capture cap = {0};
+    cap.finish_reason = LLM_FINISH_REASON_UNKNOWN;
+
+    llm_stream_callbacks_t callbacks = {0};
+    callbacks.user_data = &cap;
+    callbacks.on_content_delta = on_content_delta;
+    callbacks.on_finish_reason = on_finish_reason;
+
+    const char* prompt = "ping";
+    bool ok = llm_completions_stream_with_headers(client, prompt, strlen(prompt), NULL, &callbacks, request_headers, 1);
+    if (!require(ok, "llm_completions_stream failed")) return false;
+    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake.headers_ok, "headers unstable during completions stream callbacks")) return false;
+    if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
+    if (!require(cap.len == 3, "stream content length mismatch")) return false;
+    if (!require(memcmp(cap.content, "hi!", 3) == 0, "stream content mismatch")) return false;
+
+    llm_client_destroy(client);
+    return true;
+}
+
 static bool test_contract_proxy_passthrough(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -440,6 +484,7 @@ int main(void) {
     if (!test_contract_completions_missing_choices()) return 1;
     if (!test_contract_body_ownership()) return 1;
     if (!test_contract_streaming_headers()) return 1;
+    if (!test_contract_completions_streaming_headers()) return 1;
     if (!test_contract_proxy_passthrough()) return 1;
     if (!test_contract_failure_propagation()) return 1;
     printf("Transport contract tests passed.\n");

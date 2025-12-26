@@ -91,7 +91,7 @@ The library is functional end-to-end, but the remaining work is about:
     - or a documented config knob
   - Never silently alias endpoints
 
-- [ ] **Streaming completions**
+- [x] **Streaming completions**
   - Implement streamed completions using the same SSE engine as chat
   - Share extraction helpers
   - Ensure:
