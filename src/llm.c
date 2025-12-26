@@ -20,6 +20,10 @@ struct llm_client {
     char* auth_header;
     char* tls_ca_bundle_path;
     char* tls_ca_dir_path;
+    char* tls_client_cert_path;
+    char* tls_client_key_path;
+    llm_tls_key_password_cb tls_key_password_cb;
+    void* tls_key_password_user_data;
     bool tls_verify_peer;
     bool tls_verify_host;
     bool tls_insecure;
@@ -124,6 +128,8 @@ void llm_client_destroy(llm_client_t* client) {
         free(client->auth_header);
         free(client->tls_ca_bundle_path);
         free(client->tls_ca_dir_path);
+        free(client->tls_client_cert_path);
+        free(client->tls_client_key_path);
         free(client->proxy_url);
         free(client);
     }
@@ -186,8 +192,14 @@ bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls
     if (!tls) {
         free(client->tls_ca_bundle_path);
         free(client->tls_ca_dir_path);
+        free(client->tls_client_cert_path);
+        free(client->tls_client_key_path);
         client->tls_ca_bundle_path = NULL;
         client->tls_ca_dir_path = NULL;
+        client->tls_client_cert_path = NULL;
+        client->tls_client_key_path = NULL;
+        client->tls_key_password_cb = NULL;
+        client->tls_key_password_user_data = NULL;
         client->tls_verify_peer = true;
         client->tls_verify_host = true;
         client->tls_insecure = false;
@@ -207,11 +219,36 @@ bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls
             return false;
         }
     }
+    char* cert_path = NULL;
+    if (tls->client_cert_path) {
+        cert_path = strdup(tls->client_cert_path);
+        if (!cert_path) {
+            free(ca_path);
+            free(ca_dir);
+            return false;
+        }
+    }
+    char* key_path = NULL;
+    if (tls->client_key_path) {
+        key_path = strdup(tls->client_key_path);
+        if (!key_path) {
+            free(ca_path);
+            free(ca_dir);
+            free(cert_path);
+            return false;
+        }
+    }
 
     free(client->tls_ca_bundle_path);
     free(client->tls_ca_dir_path);
+    free(client->tls_client_cert_path);
+    free(client->tls_client_key_path);
     client->tls_ca_bundle_path = ca_path;
     client->tls_ca_dir_path = ca_dir;
+    client->tls_client_cert_path = cert_path;
+    client->tls_client_key_path = key_path;
+    client->tls_key_password_cb = tls->key_password_cb;
+    client->tls_key_password_user_data = tls->key_password_user_data;
     switch (tls->verify_peer) {
         case LLM_TLS_VERIFY_OFF:
             client->tls_verify_peer = false;
@@ -358,6 +395,10 @@ static bool llm_header_set_init(struct header_set* set, const llm_client_t* clie
 static const llm_tls_config_t* llm_client_tls_config(const llm_client_t* client, llm_tls_config_t* out) {
     out->ca_bundle_path = client->tls_ca_bundle_path;
     out->ca_dir_path = client->tls_ca_dir_path;
+    out->client_cert_path = client->tls_client_cert_path;
+    out->client_key_path = client->tls_client_key_path;
+    out->key_password_cb = client->tls_key_password_cb;
+    out->key_password_user_data = client->tls_key_password_user_data;
     out->verify_peer = client->tls_verify_peer ? LLM_TLS_VERIFY_ON : LLM_TLS_VERIFY_OFF;
     out->verify_host = client->tls_verify_host ? LLM_TLS_VERIFY_ON : LLM_TLS_VERIFY_OFF;
     out->insecure = client->tls_insecure;

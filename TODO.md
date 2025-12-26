@@ -48,7 +48,7 @@ The library is functional end-to-end, but the remaining work is about:
     - explicit insecure mode (must be loud and opt-in)
   - Ensure options never auto-load from env unless caller requests it
 
-- [ ] **mTLS support**
+- [x] **mTLS support**
   - Add explicit fields for:
     - client cert path
     - client key path

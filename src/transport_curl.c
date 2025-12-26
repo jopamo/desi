@@ -29,11 +29,13 @@ static bool resolve_verify_mode(llm_tls_verify_mode_t mode, bool default_value) 
     }
 }
 
-static void apply_tls_config(CURL* curl, const llm_tls_config_t* tls) {
+static bool apply_tls_config(CURL* curl, const llm_tls_config_t* tls, char* key_pass_buf, size_t key_pass_cap) {
     bool verify_peer = true;
     bool verify_host = true;
     const char* ca_bundle_path = NULL;
     const char* ca_dir_path = NULL;
+    const char* client_cert_path = NULL;
+    const char* client_key_path = NULL;
     bool insecure = false;
 
     if (tls) {
@@ -41,6 +43,8 @@ static void apply_tls_config(CURL* curl, const llm_tls_config_t* tls) {
         verify_host = resolve_verify_mode(tls->verify_host, verify_host);
         ca_bundle_path = tls->ca_bundle_path;
         ca_dir_path = tls->ca_dir_path;
+        client_cert_path = tls->client_cert_path;
+        client_key_path = tls->client_key_path;
         insecure = tls->insecure;
     }
 
@@ -64,6 +68,28 @@ static void apply_tls_config(CURL* curl, const llm_tls_config_t* tls) {
     } else if (info && info->capath && info->capath[0]) {
         curl_easy_setopt(curl, CURLOPT_CAPATH, info->capath);
     }
+
+    if (client_cert_path) {
+        curl_easy_setopt(curl, CURLOPT_SSLCERT, client_cert_path);
+    }
+
+    if (client_key_path) {
+        curl_easy_setopt(curl, CURLOPT_SSLKEY, client_key_path);
+    }
+
+    if (tls && tls->key_password_cb) {
+        if (!key_pass_buf || key_pass_cap == 0) return false;
+        memset(key_pass_buf, 0, key_pass_cap);
+        if (!tls->key_password_cb(tls->key_password_user_data, key_pass_buf, key_pass_cap)) {
+            return false;
+        }
+        if (!memchr(key_pass_buf, '\0', key_pass_cap)) {
+            return false;
+        }
+        curl_easy_setopt(curl, CURLOPT_KEYPASSWD, key_pass_buf);
+    }
+
+    return true;
 }
 
 static void apply_proxy_config(CURL* curl, const char* proxy_url) {
@@ -95,9 +121,16 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
     struct curl_slist* header_list = NULL;
     header_list = append_headers(header_list, headers, headers_count);
+    char key_pass_buf[1024];
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    apply_tls_config(curl, tls);
+    if (!apply_tls_config(curl, tls, key_pass_buf, sizeof(key_pass_buf))) {
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        growbuf_free(&buf);
+        memset(key_pass_buf, 0, sizeof(key_pass_buf));
+        return false;
+    }
     apply_proxy_config(curl, proxy_url);
     if (header_list) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
@@ -126,6 +159,7 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
     curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
+    memset(key_pass_buf, 0, sizeof(key_pass_buf));
     return success;
 }
 
@@ -142,9 +176,16 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
     struct curl_slist* header_list = NULL;
     header_list = curl_slist_append(header_list, "Content-Type: application/json");
     header_list = append_headers(header_list, headers, headers_count);
+    char key_pass_buf[1024];
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    apply_tls_config(curl, tls);
+    if (!apply_tls_config(curl, tls, key_pass_buf, sizeof(key_pass_buf))) {
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        growbuf_free(&buf);
+        memset(key_pass_buf, 0, sizeof(key_pass_buf));
+        return false;
+    }
     apply_proxy_config(curl, proxy_url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
@@ -170,6 +211,7 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
 
     curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
+    memset(key_pass_buf, 0, sizeof(key_pass_buf));
     return success;
 }
 
@@ -192,6 +234,7 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
     struct curl_slist* header_list = NULL;
     header_list = curl_slist_append(header_list, "Content-Type: application/json");
     header_list = append_headers(header_list, headers, headers_count);
+    char key_pass_buf[1024];
 
     struct {
         stream_cb cb;
@@ -199,7 +242,12 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
     } ctx = {cb, user_data};
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    apply_tls_config(curl, tls);
+    if (!apply_tls_config(curl, tls, key_pass_buf, sizeof(key_pass_buf))) {
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        memset(key_pass_buf, 0, sizeof(key_pass_buf));
+        return false;
+    }
     apply_proxy_config(curl, proxy_url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
@@ -221,5 +269,6 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
 
     curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);
+    memset(key_pass_buf, 0, sizeof(key_pass_buf));
     return success;
 }

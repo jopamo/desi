@@ -31,10 +31,16 @@ typedef enum {
     LLM_TLS_VERIFY_OFF,
 } llm_tls_verify_mode_t;
 
+typedef bool (*llm_tls_key_password_cb)(void* user_data, char* out, size_t out_cap);
+
 // TLS configuration (copied into the client)
 typedef struct llm_tls_config {
-    const char* ca_bundle_path;  // optional path to PEM bundle
-    const char* ca_dir_path;     // optional path to CA directory
+    const char* ca_bundle_path;               // optional path to PEM bundle
+    const char* ca_dir_path;                  // optional path to CA directory
+    const char* client_cert_path;             // optional path to client cert PEM
+    const char* client_key_path;              // optional path to client key PEM
+    llm_tls_key_password_cb key_password_cb;  // optional key password callback
+    void* key_password_user_data;
     llm_tls_verify_mode_t verify_peer;
     llm_tls_verify_mode_t verify_host;
     bool insecure;  // explicitly disable verification

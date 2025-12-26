@@ -54,6 +54,113 @@ static bool generate_cert(const char* cert_path, const char* key_path) {
     return run_openssl(argv);
 }
 
+static bool generate_ca_cert(const char* cert_path, const char* key_path) {
+    char* const argv[] = {
+        "openssl",  "req",
+        "-x509",    "-newkey",
+        "rsa:2048", "-nodes",
+        "-keyout",  (char*)key_path,
+        "-out",     (char*)cert_path,
+        "-addext",  "basicConstraints=CA:TRUE",
+        "-addext",  "keyUsage=keyCertSign",
+        "-subj",    "/CN=desi-test-ca",
+        "-days",    "1",
+        NULL,
+    };
+
+    return run_openssl(argv);
+}
+
+static bool generate_server_cert_signed(const char* ca_cert_path, const char* ca_key_path, const char* cert_path,
+                                        const char* key_path, const char* csr_path, const char* serial_path) {
+    char* const req_argv[] = {
+        "openssl",       "req",  "-newkey",       "rsa:2048", "-nodes",        "-keyout",
+        (char*)key_path, "-out", (char*)csr_path, "-subj",    "/CN=localhost", NULL,
+    };
+
+    if (!run_openssl(req_argv)) return false;
+
+    char* const sign_argv[] = {
+        "openssl",
+        "x509",
+        "-req",
+        "-in",
+        (char*)csr_path,
+        "-CA",
+        (char*)ca_cert_path,
+        "-CAkey",
+        (char*)ca_key_path,
+        "-CAserial",
+        (char*)serial_path,
+        "-CAcreateserial",
+        "-out",
+        (char*)cert_path,
+        "-days",
+        "1",
+        NULL,
+    };
+
+    return run_openssl(sign_argv);
+}
+
+static bool generate_client_cert_signed(const char* ca_cert_path, const char* ca_key_path, const char* cert_path,
+                                        const char* key_path, const char* csr_path, const char* serial_path,
+                                        const char* passphrase) {
+    if (passphrase) {
+        char pass_arg[128];
+        int len = snprintf(pass_arg, sizeof(pass_arg), "pass:%s", passphrase);
+        if (len < 0 || (size_t)len >= sizeof(pass_arg)) return false;
+        char* const req_argv[] = {
+            "openssl",  "req",
+            "-newkey",  "rsa:2048",
+            "-keyout",  (char*)key_path,
+            "-out",     (char*)csr_path,
+            "-subj",    "/CN=desi-test-client",
+            "-passout", pass_arg,
+            NULL,
+        };
+        if (!run_openssl(req_argv)) return false;
+    } else {
+        char* const req_argv[] = {
+            "openssl",
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            (char*)key_path,
+            "-out",
+            (char*)csr_path,
+            "-subj",
+            "/CN=desi-test-client",
+            NULL,
+        };
+        if (!run_openssl(req_argv)) return false;
+    }
+
+    char* const sign_argv[] = {
+        "openssl",
+        "x509",
+        "-req",
+        "-in",
+        (char*)csr_path,
+        "-CA",
+        (char*)ca_cert_path,
+        "-CAkey",
+        (char*)ca_key_path,
+        "-CAserial",
+        (char*)serial_path,
+        "-CAcreateserial",
+        "-out",
+        (char*)cert_path,
+        "-days",
+        "1",
+        NULL,
+    };
+
+    return run_openssl(sign_argv);
+}
+
 static bool copy_file(const char* src_path, const char* dst_path) {
     int in_fd = open(src_path, O_RDONLY);
     if (in_fd < 0) return false;
@@ -148,6 +255,19 @@ static pid_t start_tls_server(const char* cert_path, const char* key_path, uint1
     return pid;
 }
 
+static pid_t start_mtls_server(const char* cert_path, const char* key_path, const char* ca_cert_path, uint16_t port) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+        execlp("openssl", "openssl", "s_server", "-accept", port_str, "-key", key_path, "-cert", cert_path, "-CAfile",
+               ca_cert_path, "-Verify", "1", "-verify_return_error", "-www", "-quiet", NULL);
+        _exit(127);
+    }
+    return pid;
+}
+
 static bool wait_for_port(uint16_t port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -179,6 +299,21 @@ static void stop_tls_server(pid_t pid) {
     waitpid(pid, NULL, 0);
 }
 
+struct key_password_ctx {
+    const char* password;
+    bool called;
+};
+
+static bool key_password_cb(void* user_data, char* out, size_t out_cap) {
+    struct key_password_ctx* ctx = user_data;
+    ctx->called = true;
+    size_t len = strlen(ctx->password);
+    if (len + 1 > out_cap) return false;
+    memcpy(out, ctx->password, len);
+    out[len] = '\0';
+    return true;
+}
+
 int main(void) {
     int status = 1;
     char tempdir[] = "/tmp/desi_tls_test_XXXXXX";
@@ -188,11 +323,41 @@ int main(void) {
     char ca_cert_path[PATH_MAX];
     char base_url_localhost[256];
     char base_url_ip[256];
+    char mtls_ca_cert_path[PATH_MAX];
+    char mtls_ca_key_path[PATH_MAX];
+    char mtls_server_cert_path[PATH_MAX];
+    char mtls_server_key_path[PATH_MAX];
+    char mtls_server_csr_path[PATH_MAX];
+    char mtls_server_serial_path[PATH_MAX];
+    char mtls_client_cert_path[PATH_MAX];
+    char mtls_client_key_path[PATH_MAX];
+    char mtls_client_csr_path[PATH_MAX];
+    char mtls_client_serial_path[PATH_MAX];
+    char mtls_client_enc_cert_path[PATH_MAX];
+    char mtls_client_enc_key_path[PATH_MAX];
+    char mtls_client_enc_csr_path[PATH_MAX];
+    char mtls_client_enc_serial_path[PATH_MAX];
+    char base_url_mtls[256];
     pid_t server_pid = -1;
     llm_client_t* client_localhost = NULL;
     llm_client_t* client_ip = NULL;
+    llm_client_t* client_mtls = NULL;
 
     ca_dir[0] = '\0';
+    mtls_ca_cert_path[0] = '\0';
+    mtls_ca_key_path[0] = '\0';
+    mtls_server_cert_path[0] = '\0';
+    mtls_server_key_path[0] = '\0';
+    mtls_server_csr_path[0] = '\0';
+    mtls_server_serial_path[0] = '\0';
+    mtls_client_cert_path[0] = '\0';
+    mtls_client_key_path[0] = '\0';
+    mtls_client_csr_path[0] = '\0';
+    mtls_client_serial_path[0] = '\0';
+    mtls_client_enc_cert_path[0] = '\0';
+    mtls_client_enc_key_path[0] = '\0';
+    mtls_client_enc_csr_path[0] = '\0';
+    mtls_client_enc_serial_path[0] = '\0';
 
     if (!mkdtemp(tempdir)) {
         perror("mkdtemp");
@@ -366,15 +531,173 @@ int main(void) {
     free((void*)body);
     body = NULL;
 
+    if (client_localhost) {
+        llm_client_destroy(client_localhost);
+        client_localhost = NULL;
+    }
+    if (client_ip) {
+        llm_client_destroy(client_ip);
+        client_ip = NULL;
+    }
+    stop_tls_server(server_pid);
+    server_pid = -1;
+
+    snprintf(mtls_ca_cert_path, sizeof(mtls_ca_cert_path), "%s/mtls_ca.pem", tempdir);
+    snprintf(mtls_ca_key_path, sizeof(mtls_ca_key_path), "%s/mtls_ca_key.pem", tempdir);
+    snprintf(mtls_server_cert_path, sizeof(mtls_server_cert_path), "%s/mtls_server_cert.pem", tempdir);
+    snprintf(mtls_server_key_path, sizeof(mtls_server_key_path), "%s/mtls_server_key.pem", tempdir);
+    snprintf(mtls_server_csr_path, sizeof(mtls_server_csr_path), "%s/mtls_server.csr", tempdir);
+    snprintf(mtls_server_serial_path, sizeof(mtls_server_serial_path), "%s/mtls_server.srl", tempdir);
+    snprintf(mtls_client_cert_path, sizeof(mtls_client_cert_path), "%s/mtls_client_cert.pem", tempdir);
+    snprintf(mtls_client_key_path, sizeof(mtls_client_key_path), "%s/mtls_client_key.pem", tempdir);
+    snprintf(mtls_client_csr_path, sizeof(mtls_client_csr_path), "%s/mtls_client.csr", tempdir);
+    snprintf(mtls_client_serial_path, sizeof(mtls_client_serial_path), "%s/mtls_client.srl", tempdir);
+    snprintf(mtls_client_enc_cert_path, sizeof(mtls_client_enc_cert_path), "%s/mtls_client_enc_cert.pem", tempdir);
+    snprintf(mtls_client_enc_key_path, sizeof(mtls_client_enc_key_path), "%s/mtls_client_enc_key.pem", tempdir);
+    snprintf(mtls_client_enc_csr_path, sizeof(mtls_client_enc_csr_path), "%s/mtls_client_enc.csr", tempdir);
+    snprintf(mtls_client_enc_serial_path, sizeof(mtls_client_enc_serial_path), "%s/mtls_client_enc.srl", tempdir);
+
+    if (!generate_ca_cert(mtls_ca_cert_path, mtls_ca_key_path)) {
+        fprintf(stderr, "Failed to generate mTLS CA cert\n");
+        goto cleanup;
+    }
+
+    if (!generate_server_cert_signed(mtls_ca_cert_path, mtls_ca_key_path, mtls_server_cert_path, mtls_server_key_path,
+                                     mtls_server_csr_path, mtls_server_serial_path)) {
+        fprintf(stderr, "Failed to generate mTLS server cert\n");
+        goto cleanup;
+    }
+
+    if (!generate_client_cert_signed(mtls_ca_cert_path, mtls_ca_key_path, mtls_client_cert_path, mtls_client_key_path,
+                                     mtls_client_csr_path, mtls_client_serial_path, NULL)) {
+        fprintf(stderr, "Failed to generate mTLS client cert\n");
+        goto cleanup;
+    }
+
+    const char* mtls_pass = "mtls-pass";
+    if (!generate_client_cert_signed(mtls_ca_cert_path, mtls_ca_key_path, mtls_client_enc_cert_path,
+                                     mtls_client_enc_key_path, mtls_client_enc_csr_path, mtls_client_enc_serial_path,
+                                     mtls_pass)) {
+        fprintf(stderr, "Failed to generate encrypted mTLS client cert\n");
+        goto cleanup;
+    }
+
+    uint16_t mtls_port = 0;
+    if (!reserve_port(&mtls_port)) {
+        fprintf(stderr, "Failed to reserve mTLS port\n");
+        goto cleanup;
+    }
+
+    server_pid = start_mtls_server(mtls_server_cert_path, mtls_server_key_path, mtls_ca_cert_path, mtls_port);
+    if (server_pid < 0) {
+        fprintf(stderr, "Failed to start mTLS server\n");
+        goto cleanup;
+    }
+
+    if (!wait_for_port(mtls_port)) {
+        fprintf(stderr, "mTLS server did not start\n");
+        goto cleanup;
+    }
+
+    snprintf(base_url_mtls, sizeof(base_url_mtls), "https://localhost:%u", (unsigned)mtls_port);
+
+    client_mtls = llm_client_create(base_url_mtls, &model, &timeout, &limits);
+    if (!client_mtls) {
+        fprintf(stderr, "Failed to create mTLS client\n");
+        goto cleanup;
+    }
+
+    llm_tls_config_t mtls_no_cert = {0};
+    mtls_no_cert.ca_bundle_path = mtls_ca_cert_path;
+    mtls_no_cert.verify_host = LLM_TLS_VERIFY_OFF;
+    if (!llm_client_set_tls_config(client_mtls, &mtls_no_cert)) {
+        fprintf(stderr, "Failed to set mTLS CA config\n");
+        goto cleanup;
+    }
+
+    if (llm_props_get(client_mtls, &body, &body_len)) {
+        fprintf(stderr, "Unexpected mTLS success without client cert\n");
+        free((void*)body);
+        goto cleanup;
+    }
+
+    llm_tls_config_t mtls_with_cert = {0};
+    mtls_with_cert.ca_bundle_path = mtls_ca_cert_path;
+    mtls_with_cert.client_cert_path = mtls_client_cert_path;
+    mtls_with_cert.client_key_path = mtls_client_key_path;
+    mtls_with_cert.verify_host = LLM_TLS_VERIFY_OFF;
+    if (!llm_client_set_tls_config(client_mtls, &mtls_with_cert)) {
+        fprintf(stderr, "Failed to set mTLS client cert\n");
+        goto cleanup;
+    }
+
+    if (!llm_props_get(client_mtls, &body, &body_len)) {
+        fprintf(stderr, "mTLS failed with client cert\n");
+        goto cleanup;
+    }
+    free((void*)body);
+    body = NULL;
+
+    llm_tls_config_t mtls_encrypted = {0};
+    mtls_encrypted.ca_bundle_path = mtls_ca_cert_path;
+    mtls_encrypted.client_cert_path = mtls_client_enc_cert_path;
+    mtls_encrypted.client_key_path = mtls_client_enc_key_path;
+    mtls_encrypted.verify_host = LLM_TLS_VERIFY_OFF;
+    if (!llm_client_set_tls_config(client_mtls, &mtls_encrypted)) {
+        fprintf(stderr, "Failed to set encrypted mTLS client cert\n");
+        goto cleanup;
+    }
+
+    if (llm_props_get(client_mtls, &body, &body_len)) {
+        fprintf(stderr, "Unexpected mTLS success without key password\n");
+        free((void*)body);
+        goto cleanup;
+    }
+
+    struct key_password_ctx pass_ctx = {mtls_pass, false};
+    mtls_encrypted.key_password_cb = key_password_cb;
+    mtls_encrypted.key_password_user_data = &pass_ctx;
+    if (!llm_client_set_tls_config(client_mtls, &mtls_encrypted)) {
+        fprintf(stderr, "Failed to set mTLS key password callback\n");
+        goto cleanup;
+    }
+
+    if (!llm_props_get(client_mtls, &body, &body_len)) {
+        fprintf(stderr, "mTLS failed with key password\n");
+        goto cleanup;
+    }
+    if (!pass_ctx.called) {
+        fprintf(stderr, "mTLS key password callback not invoked\n");
+        free((void*)body);
+        goto cleanup;
+    }
+    free((void*)body);
+    body = NULL;
+
     status = 0;
 
 cleanup:
     if (client_localhost) llm_client_destroy(client_localhost);
     if (client_ip) llm_client_destroy(client_ip);
+    if (client_mtls) llm_client_destroy(client_mtls);
     stop_tls_server(server_pid);
     if (ca_dir[0]) cleanup_dir(ca_dir);
     remove(cert_path);
     remove(key_path);
+    if (mtls_ca_cert_path[0]) remove(mtls_ca_cert_path);
+    if (mtls_ca_key_path[0]) remove(mtls_ca_key_path);
+    if (mtls_server_cert_path[0]) remove(mtls_server_cert_path);
+    if (mtls_server_key_path[0]) remove(mtls_server_key_path);
+    if (mtls_server_csr_path[0]) remove(mtls_server_csr_path);
+    if (mtls_server_serial_path[0]) remove(mtls_server_serial_path);
+    if (mtls_client_cert_path[0]) remove(mtls_client_cert_path);
+    if (mtls_client_key_path[0]) remove(mtls_client_key_path);
+    if (mtls_client_csr_path[0]) remove(mtls_client_csr_path);
+    if (mtls_client_serial_path[0]) remove(mtls_client_serial_path);
+    if (mtls_client_enc_cert_path[0]) remove(mtls_client_enc_cert_path);
+    if (mtls_client_enc_key_path[0]) remove(mtls_client_enc_key_path);
+    if (mtls_client_enc_csr_path[0]) remove(mtls_client_enc_csr_path);
+    if (mtls_client_enc_serial_path[0]) remove(mtls_client_enc_serial_path);
     rmdir(tempdir);
     return status;
 }
