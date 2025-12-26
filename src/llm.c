@@ -873,6 +873,9 @@ static void on_sse_data(void* user_data, span_t line) {
                     }
                     ctx->accums_count = new_count;
                 }
+                if (ctx->callbacks->on_tool_call_delta) {
+                    ctx->callbacks->on_tool_call_delta(ctx->callbacks->user_data, td);
+                }
                 accum_feed_delta(&ctx->accums[td->index], td, ctx->max_tool_args);
                 if (td->arguments_fragment && ctx->callbacks->on_tool_args_fragment) {
                     ctx->callbacks->on_tool_args_fragment(ctx->callbacks->user_data, td->index, td->arguments_fragment,

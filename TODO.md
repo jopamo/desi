@@ -144,7 +144,7 @@ The library is functional end-to-end, but the remaining work is about:
     - repeated partial chunks
     - malicious never-ending frame
 
-- [ ] **Tool delta callbacks**
+- [x] **Tool delta callbacks**
   - Add optional callbacks that surface tool deltas while streaming:
     - tool_call index
     - id if present
