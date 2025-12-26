@@ -44,9 +44,10 @@ static void stream_capture_append(struct stream_capture* cap, const char* data, 
     cap->data[cap->len] = '\0';
 }
 
-static void on_stream_chunk(const char* chunk, size_t len, void* user_data) {
+static bool on_stream_chunk(const char* chunk, size_t len, void* user_data) {
     struct stream_capture* cap = user_data;
     stream_capture_append(cap, chunk, len);
+    return !cap->failed;
 }
 
 static int create_listener(uint16_t* port_out) {
