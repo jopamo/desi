@@ -9,7 +9,7 @@ int main(void) {
     llm_client_t* client = llm_client_create("https://api.openai.com", &model, NULL, NULL);
     if (!client) return 1;
 
-    llm_message_t messages[] = {{LLM_ROLE_USER, "Say hello!", 10, NULL, 0, NULL, 0, NULL, 0}};
+    llm_message_t messages[] = {{LLM_ROLE_USER, "Say hello!", 10, NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
 
     llm_chat_result_t result;
     if (llm_chat(client, messages, 1, NULL, NULL, NULL, &result)) {

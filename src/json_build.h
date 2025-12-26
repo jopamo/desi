@@ -7,7 +7,7 @@
 
 char* build_chat_request(const char* model, const llm_message_t* messages, size_t messages_count, bool stream,
                          bool include_usage, const char* params_json, const char* tooling_json,
-                         const char* response_format_json);
+                         const char* response_format_json, size_t max_content_parts, size_t max_content_bytes);
 
 char* build_completions_request(const char* model, const char* prompt, size_t prompt_len, bool stream,
                                 bool include_usage, const char* params_json);

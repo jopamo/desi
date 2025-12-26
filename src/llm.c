@@ -250,6 +250,8 @@ llm_client_t* llm_client_create_with_headers_opts(const char* base_url, const ll
         client->limits.max_tool_output_bytes_total = 1024 * 1024;
         client->limits.max_embedding_input_bytes = 1024 * 1024;
         client->limits.max_embedding_inputs = 1024;
+        client->limits.max_content_parts = 128;
+        client->limits.max_content_bytes = 1024 * 1024;
     }
     client->tls_verify_peer = true;
     client->tls_verify_host = true;
@@ -1349,8 +1351,9 @@ llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* 
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
-    char* request_json = build_chat_request(client->model.name, messages, messages_count, false, false, params_json,
-                                            tooling_json, response_format_json);
+    char* request_json =
+        build_chat_request(client->model.name, messages, messages_count, false, false, params_json, tooling_json,
+                           response_format_json, client->limits.max_content_parts, client->limits.max_content_bytes);
     if (!request_json) {
         error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
@@ -1462,6 +1465,8 @@ bool llm_tool_message_init(llm_message_t* msg, const char* content, size_t conte
     msg->name_len = tool_name_len;
     msg->tool_calls_json = NULL;
     msg->tool_calls_json_len = 0;
+    msg->content_json = NULL;
+    msg->content_json_len = 0;
     return true;
 }
 
@@ -1470,6 +1475,7 @@ static void llm_message_free_content(llm_message_t* msg) {
         free((char*)msg->content);
         free((char*)msg->tool_call_id);
         free((char*)msg->tool_calls_json);
+        free((char*)msg->content_json);
         // Do not free name, it's not dynamically allocated in the tool loop
     }
 }
@@ -1754,8 +1760,9 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
     const bool include_usage = callbacks && callbacks->include_usage;
-    char* request_json = build_chat_request(client->model.name, messages, messages_count, true, include_usage,
-                                            params_json, tooling_json, response_format_json);
+    char* request_json =
+        build_chat_request(client->model.name, messages, messages_count, true, include_usage, params_json, tooling_json,
+                           response_format_json, client->limits.max_content_parts, client->limits.max_content_bytes);
     if (!request_json) {
         error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
@@ -1995,6 +2002,16 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
 
     for (size_t i = 0; i < initial_count; i++) {
         history[i].role = initial_messages[i].role;
+        if (initial_messages[i].content_json_len && !initial_messages[i].content_json) {
+            tool_loop_free_history(&history, &history_count);
+            last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
+            return LLM_ERR_FAILED;
+        }
+        if (initial_messages[i].content && initial_messages[i].content_json) {
+            tool_loop_free_history(&history, &history_count);
+            last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
+            return LLM_ERR_FAILED;
+        }
         if (initial_messages[i].content) {
             history[i].content = strdup(initial_messages[i].content);
             if (!history[i].content) {
@@ -2007,6 +2024,26 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
                 return LLM_ERR_FAILED;
             }
             history[i].content_len = initial_messages[i].content_len;
+        }
+        if (initial_messages[i].content_json) {
+            if (initial_messages[i].content_json_len == 0) {
+                tool_loop_free_history(&history, &history_count);
+                last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
+                return LLM_ERR_FAILED;
+            }
+            history[i].content_json = malloc(initial_messages[i].content_json_len);
+            if (!history[i].content_json) {
+                llm_message_free_content(&history[i]);
+                for (size_t j = 0; j < i; j++) {
+                    llm_message_free_content(&history[j]);
+                }
+                free(history);
+                last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
+                return LLM_ERR_FAILED;
+            }
+            memcpy((char*)history[i].content_json, initial_messages[i].content_json,
+                   initial_messages[i].content_json_len);
+            history[i].content_json_len = initial_messages[i].content_json_len;
         }
         if (initial_messages[i].tool_call_id) {
             history[i].tool_call_id = strdup(initial_messages[i].tool_call_id);

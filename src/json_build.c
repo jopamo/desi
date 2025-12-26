@@ -1,10 +1,13 @@
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 
 #include "llm/internal.h"
 #include "llm/llm.h"
+#define JSTOK_HEADER
+#include <jstok.h>
 
 static void append_lit(struct growbuf* b, const char* lit) { growbuf_append(b, lit, strlen(lit), 0); }
 
@@ -56,6 +59,30 @@ static void append_json_raw(struct growbuf* b, const char* json, size_t len) {
     } else {
         append_lit(b, "null");
     }
+}
+
+static bool validate_content_json_array(const char* json, size_t len, size_t max_parts, size_t max_bytes) {
+    if (!json || len == 0 || len > (size_t)INT_MAX) return false;
+    if (max_bytes && len > max_bytes) return false;
+
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    if ((size_t)needed > SIZE_MAX / sizeof(jstoktok_t)) return false;
+
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    bool ok = parsed > 0 && tokens[0].type == JSTOK_ARRAY;
+    if (ok && max_parts) {
+        if (tokens[0].size < 0 || (size_t)tokens[0].size > max_parts) {
+            ok = false;
+        }
+    }
+    free(tokens);
+    return ok;
 }
 
 struct fixedbuf {
@@ -308,7 +335,7 @@ bool llm_request_opts_json_write(const llm_request_opts_t* opts, char* out, size
 
 char* build_chat_request(const char* model, const llm_message_t* messages, size_t messages_count, bool stream,
                          bool include_usage, const char* params_json, const char* tooling_json,
-                         const char* response_format_json) {
+                         const char* response_format_json, size_t max_content_parts, size_t max_content_bytes) {
     struct growbuf b;
     growbuf_init(&b, 4096);
 
@@ -336,11 +363,29 @@ char* build_chat_request(const char* model, const llm_message_t* messages, size_
         }
         append_json_string(&b, role_str, strlen(role_str));
 
-        if (messages[i].content) {
+        if (messages[i].content_json) {
+            if (messages[i].content || messages[i].content_json_len == 0) {
+                growbuf_free(&b);
+                return NULL;
+            }
+            if (!validate_content_json_array(messages[i].content_json, messages[i].content_json_len, max_content_parts,
+                                             max_content_bytes)) {
+                growbuf_free(&b);
+                return NULL;
+            }
             append_lit(&b, ",\"content\":");
-            append_json_string(&b, messages[i].content, messages[i].content_len);
+            growbuf_append(&b, messages[i].content_json, messages[i].content_json_len, 0);
         } else {
-            append_lit(&b, ",\"content\":null");
+            if (messages[i].content_json_len != 0) {
+                growbuf_free(&b);
+                return NULL;
+            }
+            if (messages[i].content) {
+                append_lit(&b, ",\"content\":");
+                append_json_string(&b, messages[i].content, messages[i].content_len);
+            } else {
+                append_lit(&b, ",\"content\":null");
+            }
         }
 
         if (messages[i].role == LLM_ROLE_ASSISTANT && messages[i].tool_calls_json &&

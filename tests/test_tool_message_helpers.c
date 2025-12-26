@@ -111,7 +111,7 @@ static bool test_tool_message_basic(void) {
     bool ok = llm_tool_message_init(&msg, content, strlen(content), tool_call_id, strlen(tool_call_id), NULL, 0);
     assert_true(ok, "tool message init failed");
 
-    char* json = build_chat_request("test-model", &msg, 1, false, false, NULL, NULL, NULL);
+    char* json = build_chat_request("test-model", &msg, 1, false, false, NULL, NULL, NULL, 0, 0);
     assert_true(json != NULL, "build_chat_request failed");
     ok = expect_tool_message(json, strlen(json), content, strlen(content), tool_call_id, strlen(tool_call_id), NULL, 0,
                              false);
@@ -129,7 +129,7 @@ static bool test_tool_message_with_name(void) {
         llm_tool_message_init(&msg, content, strlen(content), tool_call_id, strlen(tool_call_id), name, strlen(name));
     assert_true(ok, "tool message init with name failed");
 
-    char* json = build_chat_request("test-model", &msg, 1, false, false, NULL, NULL, NULL);
+    char* json = build_chat_request("test-model", &msg, 1, false, false, NULL, NULL, NULL, 0, 0);
     assert_true(json != NULL, "build_chat_request failed");
     ok = expect_tool_message(json, strlen(json), content, strlen(content), tool_call_id, strlen(tool_call_id), name,
                              strlen(name), true);

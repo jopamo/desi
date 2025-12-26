@@ -314,7 +314,7 @@ int main(void) {
         "\"function\":{\"name\":\"ping\",\"arguments\":\"{\\\"a\\\":1,\\\"note\\\":\\\"hi\\\\nthere\\\"}\"}}]}}]}";
     g_fake.response_post = response_post;
 
-    llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0}};
+    llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
     llm_chat_result_t result;
     if (!require(llm_chat(client, messages, 1, NULL, NULL, NULL, &result), "non-stream chat")) {
         llm_client_destroy(client);

@@ -231,7 +231,7 @@ static bool test_stream_cancel_after_frame(void) {
     llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
     assert_true(client != NULL, "client create failed");
 
-    llm_message_t msg = {LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     struct stream_capture cap = {0};
     llm_stream_callbacks_t callbacks = {0};
     callbacks.user_data = &cap;
@@ -280,7 +280,7 @@ static bool test_stream_cancel_after_chunk(void) {
     llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
     assert_true(client != NULL, "client create failed");
 
-    llm_message_t msg = {LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     struct stream_capture cap = {0};
     llm_stream_callbacks_t callbacks = {0};
     callbacks.user_data = &cap;
@@ -349,7 +349,7 @@ static bool test_tool_loop_cancel_between_turns(void) {
     assert_true(client != NULL, "client create failed");
 
     const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
-    llm_message_t msg = {LLM_ROLE_SYSTEM, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_SYSTEM, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     struct tool_state state = {0};
 
     llm_error_t err = llm_tool_loop_run_ex(client, &msg, 1, NULL, tooling_json, NULL, tool_dispatch, &state,

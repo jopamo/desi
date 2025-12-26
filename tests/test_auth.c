@@ -630,7 +630,7 @@ int main(void) {
 
     free((char*)props_auth_json);
 
-    llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0}};
+    llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
     llm_chat_result_t result;
     if (!llm_chat_with_headers(client, messages, 1, NULL, NULL, NULL, &result, chat_headers, 1)) {
         fprintf(stderr, "Chat request failed\n");
@@ -718,7 +718,7 @@ int main(void) {
         return 1;
     }
 
-    llm_message_t noauth_messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0}};
+    llm_message_t noauth_messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
     llm_chat_result_t noauth_result = {0};
     if (llm_chat(noauth_client, noauth_messages, 1, NULL, NULL, NULL, &noauth_result)) {
         fprintf(stderr, "Chat without auth should fail\n");

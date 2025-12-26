@@ -204,7 +204,7 @@ static bool test_chat_usage_midstream(void) {
     llm_client_t* client = llm_client_create("http://fake", &model, NULL, NULL);
     if (!require(client != NULL, "client create failed")) return false;
 
-    llm_message_t msg = {LLM_ROLE_USER, "hi", 2, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "hi", 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     struct usage_capture cap = {0};
     llm_stream_callbacks_t cbs = {0};
     cbs.user_data = &cap;
@@ -291,7 +291,7 @@ static bool test_chat_usage_omitted(void) {
     llm_client_t* client = llm_client_create("http://fake", &model, NULL, NULL);
     if (!require(client != NULL, "client create failed")) return false;
 
-    llm_message_t msg = {LLM_ROLE_USER, "hi", 2, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "hi", 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     struct usage_capture cap = {0};
     llm_stream_callbacks_t cbs = {0};
     cbs.user_data = &cap;

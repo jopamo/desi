@@ -20,7 +20,7 @@ int main(void) {
     llm_client_t* client = llm_client_create("https://api.openai.com", &model, NULL, NULL);
     if (!client) return 1;
 
-    llm_message_t messages[] = {{LLM_ROLE_USER, "Tell me a short joke.", 21, NULL, 0, NULL, 0, NULL, 0}};
+    llm_message_t messages[] = {{LLM_ROLE_USER, "Tell me a short joke.", 21, NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
 
     llm_stream_callbacks_t cbs = {0};
     cbs.on_content_delta = on_content;

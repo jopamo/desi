@@ -30,6 +30,8 @@ typedef struct {
     size_t max_tool_output_bytes_total;
     size_t max_embedding_input_bytes;
     size_t max_embedding_inputs;
+    size_t max_content_parts;  // content[] part count cap
+    size_t max_content_bytes;  // content[] raw JSON bytes cap
 } llm_limits_t;
 
 typedef struct {
@@ -144,6 +146,9 @@ typedef struct {
     // For assistant tool calls (raw JSON array)
     const char* tool_calls_json;  // optional
     size_t tool_calls_json_len;
+    // For content[] raw JSON array (mutually exclusive with content)
+    const char* content_json;  // optional
+    size_t content_json_len;
 } llm_message_t;
 
 // Helper for tool-result messages; caller owns all spans (no allocation).

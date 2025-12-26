@@ -295,7 +295,7 @@ static bool test_tool_loop_includes_tool_calls(void) {
     assert_true(client != NULL, "client create failed");
 
     const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
-    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
 
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, tool_dispatch, NULL, 3);
     assert_true(ok, "tool loop failed");
@@ -337,7 +337,7 @@ static bool test_tool_loop_params_passthrough(void) {
         "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}],"
         "\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"add\"}}}";
     const char* response_format_json = "{\"type\":\"json_object\"}";
-    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
 
     bool ok =
         llm_tool_loop_run(client, &msg, 1, params_json, tooling_json, response_format_json, tool_dispatch, NULL, 3);
@@ -385,7 +385,7 @@ static bool test_tool_loop_detects_repeat(void) {
     assert_true(client != NULL, "client create failed");
 
     const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
-    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
 
     struct dispatch_state state = {0, "43", 2};
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 4);
@@ -433,7 +433,7 @@ static bool test_tool_loop_max_turns(void) {
     assert_true(client != NULL, "client create failed");
 
     const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
-    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
 
     struct dispatch_state state = {0, "43", 2};
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 1);
@@ -476,7 +476,7 @@ static bool test_tool_loop_args_limit(void) {
     const char* tooling_json =
         "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}},"
         "{\"type\":\"function\",\"function\":{\"name\":\"sub\"}}]}";
-    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
 
     struct dispatch_state state = {0, "43", 2};
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 3);
@@ -520,7 +520,7 @@ static bool test_tool_loop_output_limit(void) {
     const char* tooling_json =
         "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}},"
         "{\"type\":\"function\",\"function\":{\"name\":\"sub\"}}]}";
-    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
 
     struct dispatch_state state = {0, "abc", 3};
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 3);

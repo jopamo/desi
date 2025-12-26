@@ -214,7 +214,7 @@ Remaining work is about:
     * max stop bytes
     * reject NaNs and infinities
 
-* [ ] **Multi-part content**
+* [x] **Multi-part content**
 
   * Support `content[]` messages without media decoding
   * Provide either:
