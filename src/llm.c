@@ -298,6 +298,18 @@ void llm_client_destroy(llm_client_t* client) {
     }
 }
 
+bool llm_client_set_model(llm_client_t* client, const llm_model_t* model) {
+    if (!client || !model || !model->name) return false;
+    if (client->model.name && strcmp(client->model.name, model->name) == 0) return true;
+
+    char* name = strdup(model->name);
+    if (!name) return false;
+
+    free((char*)client->model.name);
+    client->model.name = name;
+    return true;
+}
+
 bool llm_client_set_api_key(llm_client_t* client, const char* api_key) {
     if (!client) return false;
 

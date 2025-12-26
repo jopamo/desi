@@ -275,6 +275,8 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
                                              const llm_timeout_t* timeout, const llm_limits_t* limits,
                                              const char* const* headers, size_t headers_count);
 void llm_client_destroy(llm_client_t* client);
+// Copies model name into the client; caller must synchronize with in-flight requests.
+bool llm_client_set_model(llm_client_t* client, const llm_model_t* model);
 // Copies api_key into a per-client Authorization header. Pass NULL to clear.
 bool llm_client_set_api_key(llm_client_t* client, const char* api_key);
 // Copies TLS config into the client. Pass NULL to clear.

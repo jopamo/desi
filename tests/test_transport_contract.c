@@ -567,6 +567,37 @@ static bool test_contract_completions_multi_choice_order(void) {
     return true;
 }
 
+static bool test_contract_model_switching(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/completions";
+    g_fake.response_post = "{\"choices\":[{\"text\":\"ok\"}]}";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    llm_model_t model = {"next-model"};
+    if (!require(llm_client_set_model(client, &model), "set model failed")) return false;
+
+    const char* prompt = "hi";
+    llm_completions_result_t res = {0};
+    bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &res);
+    if (!require(ok, "llm_completions failed")) return false;
+    if (!require(g_fake.last_request_body != NULL, "missing request body")) return false;
+
+    span_t model_span = {0};
+    if (!require(extract_string_field(g_fake.last_request_body, g_fake.last_request_len, "model", &model_span),
+                 "missing model field"))
+        return false;
+    if (!require(model_span.len == strlen(model.name), "model length mismatch")) return false;
+    if (!require(memcmp(model_span.ptr, model.name, model_span.len) == 0, "model mismatch")) return false;
+
+    llm_completions_free(&res);
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during model switch")) return false;
+    return true;
+}
+
 static bool test_contract_streaming_headers(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -1012,6 +1043,7 @@ int main(void) {
     if (!test_contract_body_ownership()) return 1;
     if (!test_contract_chat_multi_choice_order()) return 1;
     if (!test_contract_completions_multi_choice_order()) return 1;
+    if (!test_contract_model_switching()) return 1;
     if (!test_contract_streaming_headers()) return 1;
     if (!test_contract_chat_stream_choice_index()) return 1;
     if (!test_contract_completions_streaming_headers()) return 1;

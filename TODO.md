@@ -226,7 +226,7 @@ Remaining work is about:
     * max part count
     * max total content bytes
 
-* [ ] **Model switching**
+* [x] **Model switching**
 
   * Provide `llm_client_set_model()` or equivalent
   * Must not:
