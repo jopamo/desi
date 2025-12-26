@@ -235,7 +235,7 @@ Remaining work is about:
     * reallocate hidden client internals
   * Caller owns synchronization
 
-* [ ] **Reasoning fields and vendor variants**
+* [x] **Reasoning fields and vendor variants**
 
   * Add extraction helpers for optional vendor fields:
 
@@ -259,7 +259,7 @@ Remaining work is about:
 
 ### Tasks
 
-* [ ] **Unit test expansion**
+* [x] **Unit test expansion**
 
   * finish_reason variants
   * fragmented tool_calls across frames

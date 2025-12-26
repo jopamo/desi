@@ -81,6 +81,19 @@ static void usage_parse(const char* json, const jstoktok_t* tokens, int count, l
     }
 }
 
+static bool extract_optional_string_field(const char* json, const jstoktok_t* tokens, int count, int obj_idx,
+                                          const char* key, span_t* out) {
+    int idx = obj_get_key(tokens, count, obj_idx, json, key);
+    if (idx < 0 || tokens[idx].type != JSTOK_STRING) return false;
+    *out = tok_span(json, &tokens[idx]);
+    return true;
+}
+
+static bool extract_reasoning_span(const char* json, const jstoktok_t* tokens, int count, int obj_idx, span_t* out) {
+    if (extract_optional_string_field(json, tokens, count, obj_idx, "reasoning_content", out)) return true;
+    return extract_optional_string_field(json, tokens, count, obj_idx, "thinking", out);
+}
+
 int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result) {
     jstoktok_t* tokens = NULL;
     int count = 0;
@@ -142,11 +155,10 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
             choice->content = sp.ptr;
             choice->content_len = sp.len;
         }
-        int reasoning_idx = obj_get_key(tokens, count, message_idx, json, "reasoning_content");
-        if (reasoning_idx >= 0 && tokens[reasoning_idx].type == JSTOK_STRING) {
-            span_t sp = tok_span(json, &tokens[reasoning_idx]);
-            choice->reasoning_content = sp.ptr;
-            choice->reasoning_content_len = sp.len;
+        span_t reasoning = {0};
+        if (extract_reasoning_span(json, tokens, count, message_idx, &reasoning)) {
+            choice->reasoning_content = reasoning.ptr;
+            choice->reasoning_content_len = reasoning.len;
         }
         int tool_calls_idx = obj_get_key(tokens, count, message_idx, json, "tool_calls");
         if (tool_calls_idx >= 0 && tokens[tool_calls_idx].type == JSTOK_ARRAY) {
@@ -287,11 +299,10 @@ int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, l
                 delta->content_delta = sp.ptr;
                 delta->content_delta_len = sp.len;
             }
-            int reasoning_idx = obj_get_key(tokens, count, delta_obj_idx, json, "reasoning_content");
-            if (reasoning_idx >= 0 && tokens[reasoning_idx].type == JSTOK_STRING) {
-                span_t sp = tok_span(json, &tokens[reasoning_idx]);
-                delta->reasoning_delta = sp.ptr;
-                delta->reasoning_delta_len = sp.len;
+            span_t reasoning = {0};
+            if (extract_reasoning_span(json, tokens, count, delta_obj_idx, &reasoning)) {
+                delta->reasoning_delta = reasoning.ptr;
+                delta->reasoning_delta_len = reasoning.len;
             }
             int tool_calls_idx = obj_get_key(tokens, count, delta_obj_idx, json, "tool_calls");
             if (tool_calls_idx >= 0 && tokens[tool_calls_idx].type == JSTOK_ARRAY && tokens[tool_calls_idx].size > 0) {

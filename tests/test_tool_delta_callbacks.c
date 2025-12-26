@@ -146,6 +146,22 @@ struct tool_delta_capture {
     bool overflow;
 };
 
+struct tool_multi_capture {
+    size_t delta_calls;
+    size_t fragment_calls[2];
+    char raw_args[2][256];
+    size_t raw_args_len[2];
+    char id[2][32];
+    size_t id_len[2];
+    char name[2][32];
+    size_t name_len[2];
+    size_t final_calls;
+    size_t final_indices[4];
+    char final_args[2][256];
+    size_t final_args_len[2];
+    bool overflow;
+};
+
 static bool append_fragment(char* buf, size_t cap, size_t* len, const char* data, size_t data_len) {
     if (*len + data_len >= cap) return false;
     memcpy(buf + *len, data, data_len);
@@ -205,6 +221,52 @@ static void on_tool_args_complete(void* user_data, size_t tool_index, const char
     if (!append_fragment(cap->final_args, sizeof(cap->final_args), &cap->final_args_len, args_json, len)) {
         cap->overflow = true;
     }
+}
+
+static void on_tool_delta_multi(void* user_data, const llm_tool_call_delta_t* delta) {
+    struct tool_multi_capture* cap = user_data;
+    cap->delta_calls++;
+    if (delta->index >= 2) {
+        cap->overflow = true;
+        return;
+    }
+    size_t idx = delta->index;
+
+    if (delta->id && cap->id_len[idx] == 0) {
+        size_t take = delta->id_len < sizeof(cap->id[idx]) ? delta->id_len : sizeof(cap->id[idx]) - 1;
+        memcpy(cap->id[idx], delta->id, take);
+        cap->id[idx][take] = '\0';
+        cap->id_len[idx] = take;
+    }
+    if (delta->name && cap->name_len[idx] == 0) {
+        size_t take = delta->name_len < sizeof(cap->name[idx]) ? delta->name_len : sizeof(cap->name[idx]) - 1;
+        memcpy(cap->name[idx], delta->name, take);
+        cap->name[idx][take] = '\0';
+        cap->name_len[idx] = take;
+    }
+    if (delta->arguments_fragment) {
+        cap->fragment_calls[idx]++;
+        if (!append_fragment(cap->raw_args[idx], sizeof(cap->raw_args[idx]), &cap->raw_args_len[idx],
+                             delta->arguments_fragment, delta->arguments_fragment_len)) {
+            cap->overflow = true;
+        }
+    }
+}
+
+static void on_tool_args_complete_multi(void* user_data, size_t tool_index, const char* args_json, size_t len) {
+    struct tool_multi_capture* cap = user_data;
+    if (cap->final_calls < 4) {
+        cap->final_indices[cap->final_calls] = tool_index;
+    }
+    cap->final_calls++;
+    if (tool_index >= 2) {
+        cap->overflow = true;
+        return;
+    }
+    size_t take = len < sizeof(cap->final_args[tool_index]) ? len : sizeof(cap->final_args[tool_index]) - 1;
+    memcpy(cap->final_args[tool_index], args_json, take);
+    cap->final_args[tool_index][take] = '\0';
+    cap->final_args_len[tool_index] = take;
 }
 
 static bool parse_json_tokens(const char* json, size_t len, jstoktok_t** tokens_out, int* count_out) {
@@ -527,6 +589,123 @@ int main(void) {
         return 1;
     }
     if (!require(json_expect_string(cap.final_args, tokens, count, 0, "note", "hi\\nthere"), "final args note")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    free(tokens);
+
+    fake_reset();
+    const char* multi_stream_payload =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+        "{\"index\":0,\"id\":\"call_0\",\"function\":{\"name\":\"ping\",\"arguments\":\"{\\\"a\\\":\"}},"
+        "{\"index\":1,\"id\":\"call_1\",\"function\":{\"name\":\"pong\",\"arguments\":\"{\\\"b\\\":2\"}}"
+        "]}}]}\n\n"
+        "data: "
+        "{\"choices\":[{\"delta\":{\"tool_calls\":["
+        "{\"index\":0,\"function\":{\"arguments\":\"1}\"}},"
+        "{\"index\":1,\"function\":{\"arguments\":\"}\"}}"
+        "]}}]}\n\n"
+        "data: [DONE]\n\n";
+    g_fake.stream_payload = multi_stream_payload;
+    g_fake.stream_payload_len = strlen(multi_stream_payload);
+    g_fake.stream_chunk_size = 9;
+
+    struct tool_multi_capture multi = {0};
+    llm_stream_callbacks_t multi_cbs = {0};
+    multi_cbs.user_data = &multi;
+    multi_cbs.on_tool_call_delta = on_tool_delta_multi;
+    multi_cbs.on_tool_args_complete = on_tool_args_complete_multi;
+
+    if (!require(llm_chat_stream(client, messages, 1, NULL, NULL, NULL, &multi_cbs), "stream chat multi")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(g_fake.called_stream, "stream transport not called (multi)")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(!multi.overflow, "multi capture overflow")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.delta_calls == 4, "multi tool delta callbacks")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.fragment_calls[0] == 2 && multi.fragment_calls[1] == 2, "multi tool fragment counts")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.id_len[0] == 6 && memcmp(multi.id[0], "call_0", 6) == 0, "multi tool 0 id")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.name_len[0] == 4 && memcmp(multi.name[0], "ping", 4) == 0, "multi tool 0 name")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.id_len[1] == 6 && memcmp(multi.id[1], "call_1", 6) == 0, "multi tool 1 id")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.name_len[1] == 4 && memcmp(multi.name[1], "pong", 4) == 0, "multi tool 1 name")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+
+    const char* expected_raw0 = "{\\\"a\\\":1}";
+    const char* expected_raw1 = "{\\\"b\\\":2}";
+    if (!require(multi.raw_args_len[0] == strlen(expected_raw0) &&
+                     memcmp(multi.raw_args[0], expected_raw0, multi.raw_args_len[0]) == 0,
+                 "multi raw args 0"))
+        return 1;
+    if (!require(multi.raw_args_len[1] == strlen(expected_raw1) &&
+                     memcmp(multi.raw_args[1], expected_raw1, multi.raw_args_len[1]) == 0,
+                 "multi raw args 1"))
+        return 1;
+
+    if (!require(multi.final_calls == 2, "multi final args callback count")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(multi.final_indices[0] == 0 && multi.final_indices[1] == 1, "multi final args indices")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+
+    tokens = NULL;
+    count = 0;
+    if (!require(parse_json_tokens(multi.final_args[0], multi.final_args_len[0], &tokens, &count),
+                 "parse multi final args 0")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(tokens[0].type == JSTOK_OBJECT, "multi final args 0 object")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(json_expect_number(multi.final_args[0], tokens, count, 0, "a", 1), "multi final args 0 a")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    free(tokens);
+
+    tokens = NULL;
+    count = 0;
+    if (!require(parse_json_tokens(multi.final_args[1], multi.final_args_len[1], &tokens, &count),
+                 "parse multi final args 1")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(tokens[0].type == JSTOK_OBJECT, "multi final args 1 object")) {
+        free(tokens);
+        llm_client_destroy(client);
+        return 1;
+    }
+    if (!require(json_expect_number(multi.final_args[1], tokens, count, 0, "b", 2), "multi final args 1 b")) {
         free(tokens);
         llm_client_destroy(client);
         return 1;
