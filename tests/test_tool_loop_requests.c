@@ -24,6 +24,12 @@ struct fake_transport {
 
 static struct fake_transport g_fake;
 
+struct dispatch_state {
+    size_t calls;
+    const char* reply;
+    size_t reply_len;
+};
+
 static void fake_reset(void) {
     for (size_t i = 0; i < (sizeof(g_fake.request_bodies) / sizeof(g_fake.request_bodies[0])); i++) {
         free(g_fake.request_bodies[i]);
@@ -190,6 +196,36 @@ cleanup:
     return ok;
 }
 
+static bool extract_first_message(const char* json, size_t len, span_t* role, span_t* content) {
+    bool ok = false;
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    if (parsed <= 0 || tokens[0].type != JSTOK_OBJECT) goto cleanup;
+    int messages_idx = obj_get_key(tokens, parsed, 0, json, "messages");
+    if (messages_idx < 0 || tokens[messages_idx].type != JSTOK_ARRAY || tokens[messages_idx].size <= 0) {
+        goto cleanup;
+    }
+    int msg_idx = arr_get(tokens, parsed, messages_idx, 0);
+    if (msg_idx < 0 || tokens[msg_idx].type != JSTOK_OBJECT) goto cleanup;
+    int role_idx = obj_get_key(tokens, parsed, msg_idx, json, "role");
+    if (role_idx < 0 || tokens[role_idx].type != JSTOK_STRING) goto cleanup;
+    int content_idx = obj_get_key(tokens, parsed, msg_idx, json, "content");
+    if (content_idx < 0 || tokens[content_idx].type != JSTOK_STRING) goto cleanup;
+    *role = tok_span(json, &tokens[role_idx]);
+    *content = tok_span(json, &tokens[content_idx]);
+    ok = true;
+
+cleanup:
+    free(tokens);
+    return ok;
+}
+
 static bool tool_dispatch(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
                           size_t args_len, char** result_json, size_t* result_len) {
     (void)user_data;
@@ -202,6 +238,24 @@ static bool tool_dispatch(void* user_data, const char* tool_name, size_t name_le
         return true;
     }
     return false;
+}
+
+static bool dispatch_fixed_reply(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
+                                 size_t args_len, char** result_json, size_t* result_len) {
+    struct dispatch_state* state = user_data;
+    (void)tool_name;
+    (void)name_len;
+    (void)args_json;
+    (void)args_len;
+    if (!state || !state->reply) return false;
+    state->calls++;
+    char* out = malloc(state->reply_len + 1);
+    if (!out) return false;
+    memcpy(out, state->reply, state->reply_len);
+    out[state->reply_len] = '\0';
+    *result_json = out;
+    *result_len = state->reply_len;
+    return true;
 }
 
 static bool test_tool_loop_includes_tool_calls(void) {
@@ -290,9 +344,199 @@ static bool test_tool_loop_params_passthrough(void) {
     return true;
 }
 
+static bool test_tool_loop_detects_repeat(void) {
+    fake_reset();
+    g_fake.post_responses[0] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
+    g_fake.post_responses[1] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_2\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
+
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {1000, 2000, 2000};
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
+    limits.max_tool_args_bytes_per_call = 1024;
+    limits.max_tool_args_bytes_per_turn = 1024;
+    limits.max_tool_output_bytes_total = 1024;
+    llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
+    assert_true(client != NULL, "client create failed");
+
+    const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+
+    struct dispatch_state state = {0, "43", 2};
+    bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 4);
+    assert_true(!ok, "expected loop detection failure");
+    assert_true(state.calls == 1, "expected single dispatch");
+    assert_true(g_fake.post_calls == 2, "expected two post calls");
+
+    span_t role = {0};
+    span_t content = {0};
+    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+                "first request message parse failed");
+    assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
+    assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
+
+    span_t id = {0};
+    span_t name = {0};
+    span_t args = {0};
+    assert_true(extract_assistant_tool_call_fields(g_fake.request_bodies[1], g_fake.request_lens[1], &id, &name, &args),
+                "assistant tool_calls missing from follow-up request");
+    assert_true(id.len == 6 && memcmp(id.ptr, "call_1", 6) == 0, "tool id mismatch");
+    assert_true(name.len == 3 && memcmp(name.ptr, "add", 3) == 0, "tool name mismatch");
+    assert_true(args.len == 2 && memcmp(args.ptr, "42", 2) == 0, "tool args mismatch");
+
+    llm_client_destroy(client);
+    return true;
+}
+
+static bool test_tool_loop_max_turns(void) {
+    fake_reset();
+    g_fake.post_responses[0] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
+
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {1000, 2000, 2000};
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
+    limits.max_tool_args_bytes_per_call = 1024;
+    limits.max_tool_args_bytes_per_turn = 1024;
+    limits.max_tool_output_bytes_total = 1024;
+    llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
+    assert_true(client != NULL, "client create failed");
+
+    const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+
+    struct dispatch_state state = {0, "43", 2};
+    bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 1);
+    assert_true(!ok, "expected max turns failure");
+    assert_true(state.calls == 0, "dispatch should not run");
+    assert_true(g_fake.post_calls == 1, "expected one post call");
+
+    span_t role = {0};
+    span_t content = {0};
+    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+                "first request message parse failed");
+    assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
+    assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
+
+    llm_client_destroy(client);
+    return true;
+}
+
+static bool test_tool_loop_args_limit(void) {
+    fake_reset();
+    g_fake.post_responses[0] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":["
+        "{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"123\"}},"
+        "{\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"sub\",\"arguments\":\"456\"}}"
+        "]},\"finish_reason\":\"tool_calls\"}]}";
+
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {1000, 2000, 2000};
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
+    limits.max_tool_args_bytes_per_call = 1024;
+    limits.max_tool_args_bytes_per_turn = 4;
+    limits.max_tool_output_bytes_total = 0;
+    llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
+    assert_true(client != NULL, "client create failed");
+
+    const char* tooling_json =
+        "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"sub\"}}]}";
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+
+    struct dispatch_state state = {0, "43", 2};
+    bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 3);
+    assert_true(!ok, "expected tool args limit failure");
+    assert_true(state.calls == 0, "dispatch should not run");
+    assert_true(g_fake.post_calls == 1, "expected one post call");
+
+    span_t role = {0};
+    span_t content = {0};
+    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+                "first request message parse failed");
+    assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
+    assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
+
+    llm_client_destroy(client);
+    return true;
+}
+
+static bool test_tool_loop_output_limit(void) {
+    fake_reset();
+    g_fake.post_responses[0] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"add\",\"arguments\":\"1\"}}]},\"finish_reason\":\"tool_calls\"}]}";
+    g_fake.post_responses[1] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_2\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"sub\",\"arguments\":\"2\"}}]},\"finish_reason\":\"tool_calls\"}]}";
+
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {1000, 2000, 2000};
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
+    limits.max_tool_args_bytes_per_call = 1024;
+    limits.max_tool_args_bytes_per_turn = 1024;
+    limits.max_tool_output_bytes_total = 4;
+    llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
+    assert_true(client != NULL, "client create failed");
+
+    const char* tooling_json =
+        "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"sub\"}}]}";
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+
+    struct dispatch_state state = {0, "abc", 3};
+    bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 3);
+    assert_true(!ok, "expected tool output limit failure");
+    assert_true(state.calls == 2, "expected two dispatch calls");
+    assert_true(g_fake.post_calls == 2, "expected two post calls");
+
+    span_t role = {0};
+    span_t content = {0};
+    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+                "first request message parse failed");
+    assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
+    assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
+
+    span_t id = {0};
+    span_t name = {0};
+    span_t args = {0};
+    assert_true(extract_assistant_tool_call_fields(g_fake.request_bodies[1], g_fake.request_lens[1], &id, &name, &args),
+                "assistant tool_calls missing from follow-up request");
+    assert_true(id.len == 6 && memcmp(id.ptr, "call_1", 6) == 0, "tool id mismatch");
+    assert_true(name.len == 3 && memcmp(name.ptr, "add", 3) == 0, "tool name mismatch");
+    assert_true(args.len == 1 && memcmp(args.ptr, "1", 1) == 0, "tool args mismatch");
+
+    llm_client_destroy(client);
+    return true;
+}
+
 int main(void) {
     assert_true(test_tool_loop_includes_tool_calls(), "tool loop tool_calls request test failed");
     assert_true(test_tool_loop_params_passthrough(), "tool loop params passthrough test failed");
+    assert_true(test_tool_loop_detects_repeat(), "tool loop repeat detection test failed");
+    assert_true(test_tool_loop_max_turns(), "tool loop max turns test failed");
+    assert_true(test_tool_loop_args_limit(), "tool loop args limit test failed");
+    assert_true(test_tool_loop_output_limit(), "tool loop output limit test failed");
     printf("Tool loop request tests passed.\n");
     return 0;
 }

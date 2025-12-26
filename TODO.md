@@ -119,7 +119,7 @@ Remaining work is about:
     * never execute tools
     * avoid allocation unless caller provides a buffer
 
-* [ ] **Tool loop safety**
+* [x] **Tool loop safety**
 
   * Strengthen loop detection using a rolling hash of:
 

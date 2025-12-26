@@ -9,6 +9,7 @@
 #define JSTOK_HEADER
 #include <jstok.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,6 +112,8 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
         client->limits.max_frame_bytes = 1024 * 1024;
         client->limits.max_sse_buffer_bytes = 10 * 1024 * 1024;
         client->limits.max_tool_args_bytes_per_call = 1024 * 1024;
+        client->limits.max_tool_args_bytes_per_turn = 1024 * 1024;
+        client->limits.max_tool_output_bytes_total = 1024 * 1024;
         client->limits.max_embedding_input_bytes = 1024 * 1024;
         client->limits.max_embedding_inputs = 1024;
     }
@@ -954,6 +957,87 @@ static void llm_message_free_content(llm_message_t* msg) {
     }
 }
 
+enum { TOOL_LOOP_HASH_WINDOW = 8 };
+
+struct tool_loop_guard {
+    uint64_t recent_hashes[TOOL_LOOP_HASH_WINDOW];
+    size_t recent_count;
+    size_t recent_pos;
+};
+
+static void tool_loop_guard_init(struct tool_loop_guard* guard) { memset(guard, 0, sizeof(*guard)); }
+
+static bool tool_loop_guard_seen(struct tool_loop_guard* guard, uint64_t hash) {
+    for (size_t i = 0; i < guard->recent_count; i++) {
+        if (guard->recent_hashes[i] == hash) return true;
+    }
+    guard->recent_hashes[guard->recent_pos] = hash;
+    if (guard->recent_count < TOOL_LOOP_HASH_WINDOW) {
+        guard->recent_count++;
+    }
+    guard->recent_pos = (guard->recent_pos + 1) % TOOL_LOOP_HASH_WINDOW;
+    return false;
+}
+
+static uint64_t tool_loop_hash_bytes(uint64_t h, const void* data, size_t len) {
+    const unsigned char* bytes = data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= bytes[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t tool_loop_hash_u64(uint64_t h, uint64_t v) {
+    for (size_t i = 0; i < 8; i++) {
+        h ^= (unsigned char)(v & 0xffu);
+        h *= 1099511628211ULL;
+        v >>= 8;
+    }
+    return h;
+}
+
+static bool tool_loop_hash_turn(const llm_chat_result_t* result, uint64_t* out_hash) {
+    if (!result || !out_hash) return false;
+    uint64_t h = 1469598103934665603ULL;
+    h = tool_loop_hash_u64(h, (uint64_t)result->tool_calls_count);
+    for (size_t i = 0; i < result->tool_calls_count; i++) {
+        const llm_tool_call_t* tc = &result->tool_calls[i];
+        if (tc->name_len && !tc->name) return false;
+        if (tc->arguments_len && !tc->arguments) return false;
+        h = tool_loop_hash_u64(h, (uint64_t)tc->name_len);
+        if (tc->name_len) {
+            h = tool_loop_hash_bytes(h, tc->name, tc->name_len);
+        }
+        h = tool_loop_hash_u64(h, (uint64_t)tc->arguments_len);
+        if (tc->arguments_len) {
+            h = tool_loop_hash_bytes(h, tc->arguments, tc->arguments_len);
+        }
+    }
+    if (result->content_len && !result->content) return false;
+    if (result->reasoning_content_len && !result->reasoning_content) return false;
+    h = tool_loop_hash_u64(h, (uint64_t)result->content_len);
+    if (result->content_len) {
+        h = tool_loop_hash_bytes(h, result->content, result->content_len);
+    }
+    h = tool_loop_hash_u64(h, (uint64_t)result->reasoning_content_len);
+    if (result->reasoning_content_len) {
+        h = tool_loop_hash_bytes(h, result->reasoning_content, result->reasoning_content_len);
+    }
+    *out_hash = h;
+    return true;
+}
+
+static void tool_loop_free_history(llm_message_t** history, size_t* history_count) {
+    if (!history || !*history) return;
+    for (size_t i = 0; i < *history_count; i++) {
+        llm_message_free_content(&(*history)[i]);
+    }
+    free(*history);
+    *history = NULL;
+    *history_count = 0;
+}
+
 struct stream_ctx {
     const llm_stream_callbacks_t* callbacks;
     size_t choice_index;
@@ -1347,6 +1431,17 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
         }
     }
 
+    if (max_turns == 0) {
+        tool_loop_free_history(&history, &history_count);
+        return LLM_ERR_FAILED;
+    }
+
+    struct tool_loop_guard guard;
+    tool_loop_guard_init(&guard);
+    size_t tool_output_total = 0;
+    const size_t max_tool_args_per_turn = client->limits.max_tool_args_bytes_per_turn;
+    const size_t max_tool_output_total = client->limits.max_tool_output_bytes_total;
+
     llm_error_t err = LLM_ERR_NONE;
     for (size_t turn = 0; turn < max_turns; turn++) {
         if (abort_cb && abort_cb(abort_user_data)) {
@@ -1369,17 +1464,57 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
             err = LLM_ERR_FAILED;
             break;
         }
+        if (turn + 1 >= max_turns) {
+            llm_chat_result_free(&result);
+            err = LLM_ERR_FAILED;
+            break;
+        }
+
+        size_t turn_args_bytes = 0;
+        bool turn_ok = true;
+        for (size_t i = 0; i < result.tool_calls_count; i++) {
+            const llm_tool_call_t* tc = &result.tool_calls[i];
+            if (tc->name_len && !tc->name) {
+                turn_ok = false;
+                break;
+            }
+            if (tc->arguments_len && !tc->arguments) {
+                turn_ok = false;
+                break;
+            }
+            if (tc->arguments_len > SIZE_MAX - turn_args_bytes) {
+                turn_ok = false;
+                break;
+            }
+            turn_args_bytes += tc->arguments_len;
+            if (max_tool_args_per_turn && turn_args_bytes > max_tool_args_per_turn) {
+                turn_ok = false;
+                break;
+            }
+        }
+        if (!turn_ok) {
+            llm_chat_result_free(&result);
+            err = LLM_ERR_FAILED;
+            break;
+        }
+
+        uint64_t turn_hash = 0;
+        if (!tool_loop_hash_turn(&result, &turn_hash)) {
+            llm_chat_result_free(&result);
+            err = LLM_ERR_FAILED;
+            break;
+        }
+        if (tool_loop_guard_seen(&guard, turn_hash)) {
+            llm_chat_result_free(&result);
+            err = LLM_ERR_FAILED;
+            break;
+        }
 
         // Prepare for new messages (assistant + tool results)
         size_t next_history_idx = history_count;
         size_t new_total_count = history_count + 1 + result.tool_calls_count;
         llm_message_t* new_history = realloc(history, new_total_count * sizeof(llm_message_t));
         if (!new_history) {
-            // Realloc failed, free all current history and the chat result
-            for (size_t i = 0; i < history_count; i++) {
-                llm_message_free_content(&history[i]);
-            }
-            free(history);
             llm_chat_result_free(&result);
             err = LLM_ERR_FAILED;
             break;
@@ -1392,10 +1527,6 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
         assistant_msg->role = LLM_ROLE_ASSISTANT;
         assistant_msg->tool_calls_json = malloc(result.tool_calls_json_len);
         if (!assistant_msg->tool_calls_json) {
-            for (size_t i = 0; i < next_history_idx - 1; i++) {
-                llm_message_free_content(&history[i]);
-            }
-            free(history);
             llm_chat_result_free(&result);
             err = LLM_ERR_FAILED;
             break;
@@ -1413,10 +1544,6 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
             if (!combined_content) {
                 // Handle allocation failure, clean up
                 llm_message_free_content(assistant_msg);
-                for (size_t i = 0; i < next_history_idx - 1; i++) {
-                    llm_message_free_content(&history[i]);
-                }
-                free(history);
                 llm_chat_result_free(&result);
                 err = LLM_ERR_FAILED;
                 break;
@@ -1439,6 +1566,7 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
         history_count++;  // Increment history count for the assistant message
 
         // Handle tool call messages
+        bool loop_error = false;
         for (size_t i = 0; i < result.tool_calls_count; i++) {
             char* res_json = NULL;
             size_t res_len = 0;
@@ -1446,27 +1574,34 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
             // Call dispatch function
             if (!dispatch(dispatch_user_data, result.tool_calls[i].name, result.tool_calls[i].name_len,
                           result.tool_calls[i].arguments, result.tool_calls[i].arguments_len, &res_json, &res_len)) {
-                // Dispatch failed. Clean up all history messages and chat result.
-                if (res_json) free(res_json);  // Free res_json if allocated by dispatch before failure
-                for (size_t j = 0; j < history_count; j++) {
-                    llm_message_free_content(&history[j]);
-                }
-                free(history);
-                llm_chat_result_free(&result);
+                // Dispatch failed. Clean up this tool result.
+                if (res_json) free(res_json);
                 err = LLM_ERR_FAILED;
-                goto cleanup_loop;  // Exit tool loop
+                loop_error = true;
+                break;
             }
 
             // If dispatch succeeded but returned no res_json, treat as failure for loop purposes
             if (!res_json) {
-                for (size_t j = 0; j < history_count; j++) {
-                    llm_message_free_content(&history[j]);
-                }
-                free(history);
-                llm_chat_result_free(&result);
                 err = LLM_ERR_FAILED;
-                goto cleanup_loop;  // Exit tool loop
+                loop_error = true;
+                break;
             }
+
+            if (res_len > SIZE_MAX - tool_output_total) {
+                free(res_json);
+                err = LLM_ERR_FAILED;
+                loop_error = true;
+                break;
+            }
+            size_t next_output_total = tool_output_total + res_len;
+            if (max_tool_output_total && next_output_total > max_tool_output_total) {
+                free(res_json);
+                err = LLM_ERR_FAILED;
+                loop_error = true;
+                break;
+            }
+            tool_output_total = next_output_total;
 
             llm_message_t* tool_msg = &history[next_history_idx++];
             memset(tool_msg, 0, sizeof(*tool_msg));
@@ -1479,13 +1614,9 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
                 if (!tool_msg->tool_call_id) {
                     // Allocation failure, clean up
                     llm_message_free_content(tool_msg);  // Free content (res_json)
-                    for (size_t j = 0; j < next_history_idx - 1; j++) {
-                        llm_message_free_content(&history[j]);
-                    }
-                    free(history);
-                    llm_chat_result_free(&result);
                     err = LLM_ERR_FAILED;
-                    goto cleanup_loop;  // Exit tool loop
+                    loop_error = true;
+                    break;
                 }
                 tool_msg->tool_call_id_len = result.tool_calls[i].id_len;
             }
@@ -1493,14 +1624,13 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
         }
 
         llm_chat_result_free(&result);
+        if (loop_error) {
+            break;
+        }
     }
 
-cleanup_loop:
     // Free history copies if we made them
-    for (size_t i = 0; i < history_count; i++) {
-        llm_message_free_content(&history[i]);
-    }
-    free(history);
+    tool_loop_free_history(&history, &history_count);
     return err;
 }
 

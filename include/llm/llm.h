@@ -25,6 +25,8 @@ typedef struct {
     size_t max_frame_bytes;       // SSE data payload cap
     size_t max_sse_buffer_bytes;  // SSE buffer cap
     size_t max_tool_args_bytes_per_call;
+    size_t max_tool_args_bytes_per_turn;
+    size_t max_tool_output_bytes_total;
     size_t max_embedding_input_bytes;
     size_t max_embedding_inputs;
 } llm_limits_t;
