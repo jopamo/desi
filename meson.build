@@ -92,6 +92,15 @@ if get_option('tests')
   )
   test('json_build', test_json_build)
 
+  test_tool_calls_build = executable('test_tool_calls_build',
+    'tests/test_tool_calls_build.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('tool_calls_build', test_tool_calls_build)
+
   test_tools_accum = executable('test_tools_accum',
     'tests/test_tools_accum.c',
     include_directories: [inc, include_directories('src')],

@@ -103,6 +103,20 @@ typedef struct {
     size_t arguments_len;
 } llm_tool_call_t;
 
+typedef struct {
+    const char* id;  // optional
+    size_t id_len;
+    const char* name;  // required
+    size_t name_len;
+    const char* arguments_json;  // required raw JSON
+    size_t arguments_json_len;
+} llm_tool_call_build_t;
+
+// Writes tool_calls JSON array for assistant messages into caller buffer.
+// arguments_json is escaped into a JSON string; out_len receives bytes written.
+bool llm_tool_calls_json_write(const llm_tool_call_build_t* calls, size_t calls_count, char* out, size_t out_cap,
+                               size_t max_args_bytes_per_call, size_t* out_len);
+
 // Chat completion choice (non-stream)
 typedef struct {
     llm_finish_reason_t finish_reason;

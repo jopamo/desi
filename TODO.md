@@ -85,7 +85,7 @@ Remaining work is about:
 
 ### Tasks
 
-* [ ] **Outbound assistant tool_calls**
+* [x] **Outbound assistant tool_calls**
 
   * Allow constructing assistant messages containing `tool_calls[]`
   * Provide exactly two mechanisms:

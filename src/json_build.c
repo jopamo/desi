@@ -56,6 +56,117 @@ static void append_json_raw(struct growbuf* b, const char* json, size_t len) {
     }
 }
 
+struct fixedbuf {
+    char* data;
+    size_t len;
+    size_t cap;
+    bool overflow;
+};
+
+static void fixedbuf_init(struct fixedbuf* b, char* out, size_t cap) {
+    b->data = out;
+    b->len = 0;
+    b->cap = cap;
+    b->overflow = false;
+}
+
+static bool fixedbuf_append(struct fixedbuf* b, const char* data, size_t len) {
+    if (b->overflow) return false;
+    if (len == 0) return true;
+    if (b->len + len > b->cap) {
+        b->overflow = true;
+        return false;
+    }
+    memcpy(b->data + b->len, data, len);
+    b->len += len;
+    return true;
+}
+
+static bool fixedbuf_append_char(struct fixedbuf* b, char c) { return fixedbuf_append(b, &c, 1); }
+
+static bool fixedbuf_append_lit(struct fixedbuf* b, const char* lit) { return fixedbuf_append(b, lit, strlen(lit)); }
+
+static bool fixedbuf_append_json_string(struct fixedbuf* b, const char* str, size_t len) {
+    if (!fixedbuf_append_char(b, '"')) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        switch (c) {
+            case '"':
+                if (!fixedbuf_append_lit(b, "\\\"")) return false;
+                break;
+            case '\\':
+                if (!fixedbuf_append_lit(b, "\\\\")) return false;
+                break;
+            case '\b':
+                if (!fixedbuf_append_lit(b, "\\b")) return false;
+                break;
+            case '\f':
+                if (!fixedbuf_append_lit(b, "\\f")) return false;
+                break;
+            case '\n':
+                if (!fixedbuf_append_lit(b, "\\n")) return false;
+                break;
+            case '\r':
+                if (!fixedbuf_append_lit(b, "\\r")) return false;
+                break;
+            case '\t':
+                if (!fixedbuf_append_lit(b, "\\t")) return false;
+                break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[7];
+                    snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    if (!fixedbuf_append(b, buf, 6)) return false;
+                } else {
+                    if (!fixedbuf_append_char(b, c)) return false;
+                }
+                break;
+        }
+    }
+    return fixedbuf_append_char(b, '"');
+}
+
+bool llm_tool_calls_json_write(const llm_tool_call_build_t* calls, size_t calls_count, char* out, size_t out_cap,
+                               size_t max_args_bytes_per_call, size_t* out_len) {
+    if (!out || out_cap == 0 || !out_len) return false;
+    if (calls_count > 0 && !calls) return false;
+
+    *out_len = 0;
+
+    struct fixedbuf b;
+    fixedbuf_init(&b, out, out_cap);
+
+    if (!fixedbuf_append_char(&b, '[')) return false;
+    for (size_t i = 0; i < calls_count; i++) {
+        const llm_tool_call_build_t* tc = &calls[i];
+        if (!tc->name || tc->name_len == 0) return false;
+        if (!tc->arguments_json) return false;
+        if (!tc->id && tc->id_len != 0) return false;
+        if (max_args_bytes_per_call && tc->arguments_json_len > max_args_bytes_per_call) return false;
+
+        if (i > 0 && !fixedbuf_append_char(&b, ',')) return false;
+        if (!fixedbuf_append_char(&b, '{')) return false;
+
+        if (tc->id) {
+            if (!fixedbuf_append_lit(&b, "\"id\":")) return false;
+            if (!fixedbuf_append_json_string(&b, tc->id, tc->id_len)) return false;
+            if (!fixedbuf_append_char(&b, ',')) return false;
+        }
+
+        if (!fixedbuf_append_lit(&b, "\"type\":\"function\",\"function\":{")) return false;
+        if (!fixedbuf_append_lit(&b, "\"name\":")) return false;
+        if (!fixedbuf_append_json_string(&b, tc->name, tc->name_len)) return false;
+        if (!fixedbuf_append_lit(&b, ",\"arguments\":")) return false;
+        if (!fixedbuf_append_json_string(&b, tc->arguments_json, tc->arguments_json_len)) return false;
+        if (!fixedbuf_append_lit(&b, "}}")) return false;
+    }
+    if (!fixedbuf_append_char(&b, ']')) return false;
+
+    if (b.overflow) return false;
+    *out_len = b.len;
+    return true;
+}
+
 // Internal header for these functions?
 // For now they are only used in this file or can be made available to others if needed.
 
