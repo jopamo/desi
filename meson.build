@@ -180,6 +180,7 @@ if get_option('tests')
     link_with: libdesi,
     install: false,
   )
+  test('live_basic', test_live, suite: 'live')
 
   test_transport_contract = executable('test_transport_contract',
     'tests/test_transport_contract.c',
@@ -297,14 +298,7 @@ if get_option('tests')
     link_with: libdesi,
     install: false,
   )
-  # We do not add test('llmctl', ...) here if it requires a server. 
-  # But usually test runners mock things. Since this is an integration test suite now,
-  # we might want to keep it manual or make it skip if server is down.
-  # For now, I'll leave it as a target but not a default meson test if it depends on external server.
-  # Wait, the previous meson.build had test('llmctl', llmctl). 
-  # If llmctl.c is now the smoke test, it fails without server.
-  # I will NOT add it to test() to avoid breaking `meson test` in CI without server.
-  # The user can run it manually with ./build/test_live
+  test('live_llmctl', llmctl, suite: 'live')
 endif
 
 # Examples

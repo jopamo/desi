@@ -5,6 +5,21 @@
 
 #include "llm/llm.h"
 
+#define TEST_SKIP 77
+
+static bool live_tests_enabled(void) {
+    const char* env = getenv("LLM_LIVE_TESTS");
+    if (!env || env[0] == '\0') return false;
+    return !(env[0] == '0' && env[1] == '\0');
+}
+
+static bool live_should_skip(const llm_error_detail_t* detail) {
+    if (!detail) return true;
+    if (detail->stage == LLM_ERROR_STAGE_TRANSPORT || detail->stage == LLM_ERROR_STAGE_TLS) return true;
+    if (!detail->has_http_status || detail->http_status == 0) return true;
+    return false;
+}
+
 static void on_content(void* user_data, const char* delta, size_t len) {
     (void)user_data;
     printf("%.*s", (int)len, delta);
@@ -26,6 +41,11 @@ bool mock_dispatch(void* user_data, const char* tool_name, size_t name_len, cons
 }
 
 int main(void) {
+    if (!live_tests_enabled()) {
+        printf("Skipping live test (set LLM_LIVE_TESTS=1)\n");
+        return TEST_SKIP;
+    }
+
     const char* env_url = getenv("LLM_BASE_URL");
     const char* base_url = env_url ? env_url : "http://10.0.5.69:8080";
 
@@ -45,13 +65,22 @@ int main(void) {
     }
 
     printf("Checking health...\n");
-    if (llm_health(client)) {
+    llm_error_detail_t detail = {0};
+    llm_error_t health_err = llm_health_ex(client, &detail);
+    if (health_err == LLM_ERR_NONE) {
         printf("Health: OK\n");
     } else {
-        fprintf(stderr, "Health check failed (Server likely down)\n");
+        bool skip = live_should_skip(&detail);
+        llm_error_detail_free(&detail);
         llm_client_destroy(client);
+        if (skip) {
+            fprintf(stderr, "Health check failed (server unreachable), skipping\n");
+            return TEST_SKIP;
+        }
+        fprintf(stderr, "Health check failed\n");
         return 1;
     }
+    llm_error_detail_free(&detail);
 
     printf("Listing models...\n");
     size_t model_count = 0;

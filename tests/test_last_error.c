@@ -249,6 +249,7 @@ static bool test_last_error_capture_and_clear(void) {
     g_fake.response_get = "{}";
     ok = llm_props_get(client, &json, &len);
     if (!require(ok, "props should succeed")) return false;
+    free((char*)json);
 
     last = llm_client_last_error(client);
     if (!require(last != NULL, "last error still available")) return false;

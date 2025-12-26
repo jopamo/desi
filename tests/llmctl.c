@@ -31,19 +31,43 @@ static void assert_msg(bool cond, const char* fmt, ...) {
 #define LOG log_msg
 #define ASSERT assert_msg
 
+#define TEST_SKIP 77
+
 static void print_sep(const char* title) { printf("\n===== %s =====\n", title); }
 
 // Global config
 static const char* base_url = "http://10.0.5.69:8080";
 static const char* model_name = NULL;
 
-static void test_health(llm_client_t* client) {
+static bool live_tests_enabled(void) {
+    const char* env = getenv("LLM_LIVE_TESTS");
+    if (!env || env[0] == '\0') return false;
+    return !(env[0] == '0' && env[1] == '\0');
+}
+
+static bool live_should_skip(const llm_error_detail_t* detail) {
+    if (!detail) return true;
+    if (detail->stage == LLM_ERROR_STAGE_TRANSPORT || detail->stage == LLM_ERROR_STAGE_TLS) return true;
+    if (!detail->has_http_status || detail->http_status == 0) return true;
+    return false;
+}
+
+static int test_health(llm_client_t* client) {
     print_sep("1) GET /health");
-    if (llm_health(client)) {
+    llm_error_detail_t detail = {0};
+    llm_error_t err = llm_health_ex(client, &detail);
+    if (err == LLM_ERR_NONE) {
         LOG("Health check passed");
-    } else {
-        ASSERT(false, "Health check failed");
+        llm_error_detail_free(&detail);
+        return 0;
     }
+    bool skip = live_should_skip(&detail);
+    llm_error_detail_free(&detail);
+    if (skip) {
+        LOG("Skipping live tests (server unreachable)");
+        return TEST_SKIP;
+    }
+    return 1;
 }
 
 static void test_models(llm_client_t* client) {
@@ -253,6 +277,11 @@ static void test_json_mode(llm_client_t* client) {
 }
 
 int main(void) {
+    if (!live_tests_enabled()) {
+        LOG("Skipping live tests (set LLM_LIVE_TESTS=1)");
+        return TEST_SKIP;
+    }
+
     const char* env_url = getenv("LLM_BASE_URL");
     if (env_url) base_url = env_url;
 
@@ -265,7 +294,12 @@ int main(void) {
     llm_client_t* client = llm_client_create(base_url, &dummy_model, NULL, NULL);
     ASSERT(client != NULL, "Client creation failed");
 
-    test_health(client);
+    int health = test_health(client);
+    if (health == TEST_SKIP) {
+        llm_client_destroy(client);
+        return TEST_SKIP;
+    }
+    ASSERT(health == 0, "Health check failed");
     test_models(client);
 
     llm_client_destroy(client);

@@ -286,7 +286,7 @@ Remaining work is about:
     * controlled buffer lifetimes
   * Removes reliance on live servers
 
-* [ ] **Integration test gating**
+* [x] **Integration test gating**
 
   * All live tests must be opt-in
   * Require explicit env var or CLI flag
