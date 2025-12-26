@@ -241,13 +241,13 @@ static bool respond_auth_error(int fd) {
     return send_response_status(fd, "401 Unauthorized", "application/json", body, strlen(body));
 }
 
-static bool respond_health(int fd, bool auth_ok, bool org_ok, bool project_ok, bool custom_ok) {
+static bool respond_props(int fd, bool auth_ok, bool org_ok, bool project_ok, bool custom_ok) {
     const char* auth = auth_ok ? "true" : "false";
     const char* org = org_ok ? "true" : "false";
     const char* project = project_ok ? "true" : "false";
     const char* custom = custom_ok ? "true" : "false";
     char body[256];
-    int len = snprintf(body, sizeof(body), "{\"auth\":%s,\"org\":%s,\"project\":%s,\"custom\":%s,\"path\":\"/health\"}",
+    int len = snprintf(body, sizeof(body), "{\"auth\":%s,\"org\":%s,\"project\":%s,\"custom\":%s,\"path\":\"/props\"}",
                        auth, org, project, custom);
     if (len < 0 || (size_t)len >= sizeof(body)) return false;
     return send_response(fd, "application/json", body, (size_t)len);
@@ -312,8 +312,8 @@ static bool handle_request(int fd, const struct expected_headers* expected) {
         is_stream = true;
     }
 
-    if (strcmp(method, "GET") == 0 && strcmp(path, "/health") == 0) {
-        return respond_health(fd, auth_ok, org_ok, project_ok, custom_ok);
+    if (strcmp(method, "GET") == 0 && strcmp(path, "/props") == 0) {
+        return respond_props(fd, auth_ok, org_ok, project_ok, custom_ok);
     }
     if (strcmp(method, "POST") == 0 && strcmp(path, "/v1/chat/completions") == 0) {
         if (is_stream) {
@@ -603,7 +603,7 @@ int main(void) {
         return 1;
     }
 
-    if (!assert_props_json(props_json, props_len, "/health")) {
+    if (!assert_props_json(props_json, props_len, "/props")) {
         free((char*)props_json);
         llm_client_destroy(client);
         stop_server(pid);
@@ -621,7 +621,7 @@ int main(void) {
         return 1;
     }
 
-    if (!assert_props_json(props_auth_json, props_auth_len, "/health")) {
+    if (!assert_props_json(props_auth_json, props_auth_len, "/props")) {
         free((char*)props_auth_json);
         llm_client_destroy(client);
         stop_server(pid);
@@ -702,7 +702,7 @@ int main(void) {
         stop_server(pid);
         return 1;
     }
-    if (!assert_props_json(props_json_after, props_len_after, "/health")) {
+    if (!assert_props_json(props_json_after, props_len_after, "/props")) {
         free((char*)props_json_after);
         llm_client_destroy(client);
         stop_server(pid);

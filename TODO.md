@@ -83,7 +83,7 @@ The library is functional end-to-end, but the remaining work is about:
 
 ### Tasks
 
-- [ ] **Endpoint naming reconciliation**
+- [x] **Endpoint naming reconciliation**
   - Resolve `/props` vs `/health` mismatch
   - Choose one canonical endpoint name in code and tests
   - If compatibility is required, expose compatibility explicitly:

@@ -354,7 +354,7 @@ static bool test_contract_proxy_passthrough(void) {
 static bool test_contract_failure_propagation(void) {
     fake_reset();
     g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/health";
+    g_fake.expected_url = "http://fake/props";
     g_fake.fail_get = true;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);

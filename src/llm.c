@@ -533,7 +533,7 @@ void llm_models_list_free(char** models, size_t count) {
 bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t* len, const char* const* headers,
                                 size_t headers_count) {
     char url[1024];
-    snprintf(url, sizeof(url), "%s/health", client->base_url);
+    snprintf(url, sizeof(url), "%s/props", client->base_url);
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) return false;
     llm_tls_config_t tls;
