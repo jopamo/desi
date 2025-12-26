@@ -196,7 +196,7 @@ Remaining work is about:
 
 ### Tasks
 
-* [ ] **Request options struct**
+* [x] **Request options struct**
 
   * Define `llm_request_opts_t` with optional fields:
 

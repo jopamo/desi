@@ -1,3 +1,5 @@
+#include <inttypes.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -126,6 +128,42 @@ static bool fixedbuf_append_json_string(struct fixedbuf* b, const char* str, siz
     return fixedbuf_append_char(b, '"');
 }
 
+static bool fixedbuf_append_key(struct fixedbuf* b, const char* key, bool* first) {
+    if (!b || !key || !first) return false;
+    if (!*first) {
+        if (!fixedbuf_append_char(b, ',')) return false;
+    } else {
+        *first = false;
+    }
+    if (!fixedbuf_append_char(b, '"')) return false;
+    if (!fixedbuf_append(b, key, strlen(key))) return false;
+    return fixedbuf_append_lit(b, "\":");
+}
+
+static bool fixedbuf_append_double(struct fixedbuf* b, double value) {
+    char buf[64];
+    int written = snprintf(buf, sizeof(buf), "%.17g", value);
+    if (written <= 0 || (size_t)written >= sizeof(buf)) return false;
+    return fixedbuf_append(b, buf, (size_t)written);
+}
+
+static bool fixedbuf_append_int64(struct fixedbuf* b, int64_t value) {
+    char buf[32];
+    int written = snprintf(buf, sizeof(buf), "%" PRId64, value);
+    if (written <= 0 || (size_t)written >= sizeof(buf)) return false;
+    return fixedbuf_append(b, buf, (size_t)written);
+}
+
+static bool fixedbuf_append_string_array(struct fixedbuf* b, const char* const* items, const size_t* lens,
+                                         size_t count) {
+    if (!fixedbuf_append_char(b, '[')) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0 && !fixedbuf_append_char(b, ',')) return false;
+        if (!fixedbuf_append_json_string(b, items[i], lens[i])) return false;
+    }
+    return fixedbuf_append_char(b, ']');
+}
+
 bool llm_tool_calls_json_write(const llm_tool_call_build_t* calls, size_t calls_count, char* out, size_t out_cap,
                                size_t max_args_bytes_per_call, size_t* out_len) {
     if (!out || out_cap == 0 || !out_len) return false;
@@ -163,6 +201,104 @@ bool llm_tool_calls_json_write(const llm_tool_call_build_t* calls, size_t calls_
     if (!fixedbuf_append_char(&b, ']')) return false;
 
     if (b.overflow) return false;
+    *out_len = b.len;
+    return true;
+}
+
+bool llm_request_opts_json_write(const llm_request_opts_t* opts, char* out, size_t out_cap, size_t max_stop_strings,
+                                 size_t max_stop_bytes, size_t* out_len) {
+    if (!out || out_cap == 0 || !out_len) return false;
+    *out_len = 0;
+    out[0] = '\0';
+    if (!opts) return true;
+
+    if (opts->has_temperature && !isfinite(opts->temperature)) return false;
+    if (opts->has_top_p && !isfinite(opts->top_p)) return false;
+    if (opts->has_frequency_penalty && !isfinite(opts->frequency_penalty)) return false;
+    if (opts->has_presence_penalty && !isfinite(opts->presence_penalty)) return false;
+
+    bool has_stop_array = opts->stop_count > 0;
+    bool has_stop_single = opts->stop != NULL;
+    if (!opts->stop && opts->stop_len != 0) return false;
+    if (has_stop_array) {
+        if (has_stop_single || opts->stop_len != 0) return false;
+        if (!opts->stop_list || !opts->stop_lens) return false;
+        if (max_stop_strings && opts->stop_count > max_stop_strings) return false;
+        size_t total_stop_bytes = 0;
+        for (size_t i = 0; i < opts->stop_count; i++) {
+            if (!opts->stop_list[i]) return false;
+            size_t len = opts->stop_lens[i];
+            if (max_stop_bytes) {
+                if (len > max_stop_bytes - total_stop_bytes) return false;
+            }
+            total_stop_bytes += len;
+        }
+    } else {
+        if (opts->stop_list || opts->stop_lens) return false;
+        if (has_stop_single) {
+            if (max_stop_strings && max_stop_strings < 1) return false;
+            if (max_stop_bytes && opts->stop_len > max_stop_bytes) return false;
+        }
+    }
+
+    size_t write_cap = out_cap - 1;
+    struct fixedbuf b;
+    fixedbuf_init(&b, out, write_cap);
+
+    bool any = false;
+    bool first = true;
+
+    if (opts->has_temperature) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "temperature", &first)) return false;
+        if (!fixedbuf_append_double(&b, opts->temperature)) return false;
+    }
+    if (opts->has_top_p) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "top_p", &first)) return false;
+        if (!fixedbuf_append_double(&b, opts->top_p)) return false;
+    }
+    if (opts->has_max_tokens) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "max_tokens", &first)) return false;
+        if (!fixedbuf_append_int64(&b, opts->max_tokens)) return false;
+    }
+    if (has_stop_array || has_stop_single) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "stop", &first)) return false;
+        if (has_stop_array) {
+            if (!fixedbuf_append_string_array(&b, opts->stop_list, opts->stop_lens, opts->stop_count)) return false;
+        } else {
+            if (!fixedbuf_append_json_string(&b, opts->stop, opts->stop_len)) return false;
+        }
+    }
+    if (opts->has_frequency_penalty) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "frequency_penalty", &first)) return false;
+        if (!fixedbuf_append_double(&b, opts->frequency_penalty)) return false;
+    }
+    if (opts->has_presence_penalty) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "presence_penalty", &first)) return false;
+        if (!fixedbuf_append_double(&b, opts->presence_penalty)) return false;
+    }
+    if (opts->has_seed) {
+        if (!any && !fixedbuf_append_char(&b, '{')) return false;
+        any = true;
+        if (!fixedbuf_append_key(&b, "seed", &first)) return false;
+        if (!fixedbuf_append_int64(&b, opts->seed)) return false;
+    }
+
+    if (!any) return true;
+    if (!fixedbuf_append_char(&b, '}')) return false;
+    if (b.overflow) return false;
+    out[b.len] = '\0';
     *out_len = b.len;
     return true;
 }

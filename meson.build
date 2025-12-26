@@ -217,6 +217,15 @@ if get_option('tests')
   )
   test('error_detail', test_error_detail)
 
+  test_request_opts = executable('test_request_opts',
+    'tests/test_request_opts.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('request_opts', test_request_opts)
+
   test_errstr = executable('test_errstr',
     'tests/test_errstr.c',
     include_directories: [inc, include_directories('src')],

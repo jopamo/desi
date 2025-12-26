@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,26 @@ typedef struct {
     size_t max_embedding_input_bytes;
     size_t max_embedding_inputs;
 } llm_limits_t;
+
+typedef struct {
+    bool has_temperature;
+    double temperature;
+    bool has_top_p;
+    double top_p;
+    bool has_max_tokens;
+    int64_t max_tokens;
+    const char* stop;  // optional single stop string
+    size_t stop_len;
+    const char* const* stop_list;  // optional array of stop strings
+    const size_t* stop_lens;
+    size_t stop_count;
+    bool has_frequency_penalty;
+    double frequency_penalty;
+    bool has_presence_penalty;
+    double presence_penalty;
+    bool has_seed;
+    int64_t seed;
+} llm_request_opts_t;
 
 typedef enum {
     LLM_TLS_VERIFY_DEFAULT = 0,
@@ -152,6 +173,11 @@ typedef struct {
 // arguments_json is escaped into a JSON string; out_len receives bytes written.
 bool llm_tool_calls_json_write(const llm_tool_call_build_t* calls, size_t calls_count, char* out, size_t out_cap,
                                size_t max_args_bytes_per_call, size_t* out_len);
+
+// Writes request options as a JSON object string into caller buffer.
+// out_len receives bytes written (excluding the terminating NUL).
+bool llm_request_opts_json_write(const llm_request_opts_t* opts, char* out, size_t out_cap, size_t max_stop_strings,
+                                 size_t max_stop_bytes, size_t* out_len);
 
 // Chat completion choice (non-stream)
 typedef struct {
