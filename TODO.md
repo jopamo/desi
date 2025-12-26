@@ -163,7 +163,7 @@ Remaining work is about:
   * Must not fail the request if error body is malformed
   * Missing fields yield explicit “not present” semantics
 
-* [ ] **Last error storage**
+* [x] **Last error storage**
 
   * Preferred model:
 

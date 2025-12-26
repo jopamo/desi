@@ -35,6 +35,8 @@ struct llm_client {
     size_t headers_count;
     size_t custom_headers_count;
     size_t headers_cap;
+    bool last_error_enabled;
+    llm_error_detail_t last_error;
 };
 
 enum { LLM_ERROR_DETAIL_TOKENS_MAX = 64 };
@@ -115,6 +117,45 @@ static void error_detail_fill(llm_error_detail_t* detail, llm_error_t code, llm_
     }
 }
 
+static void last_error_reset(llm_client_t* client) {
+    if (!client || !client->last_error_enabled) return;
+    llm_error_detail_free(&client->last_error);
+}
+
+static void error_detail_capture(llm_client_t* client, llm_error_detail_t* detail, llm_error_t code,
+                                 llm_error_stage_t stage, long http_status, char* body, size_t body_len,
+                                 bool parse_error) {
+    if (detail) {
+        error_detail_fill(detail, code, stage, http_status, body, body_len, parse_error);
+        if (client && client->last_error_enabled) {
+            char* body_copy = NULL;
+            size_t body_copy_len = 0;
+            if (detail->raw_body && detail->raw_body_len > 0) {
+                body_copy_len = detail->raw_body_len;
+                body_copy = malloc(body_copy_len);
+                if (body_copy) {
+                    memcpy(body_copy, detail->raw_body, body_copy_len);
+                } else {
+                    body_copy_len = 0;
+                }
+            }
+            error_detail_fill(&client->last_error, code, stage, http_status, body_copy, body_copy_len, parse_error);
+        }
+        return;
+    }
+    if (client && client->last_error_enabled) {
+        error_detail_fill(&client->last_error, code, stage, http_status, body, body_len, parse_error);
+        return;
+    }
+    free(body);
+}
+
+static void last_error_set_simple_if_empty(llm_client_t* client, llm_error_t code, llm_error_stage_t stage) {
+    if (!client || !client->last_error_enabled) return;
+    if (client->last_error.code != LLM_ERR_NONE) return;
+    error_detail_fill(&client->last_error, code, stage, 0, NULL, 0, false);
+}
+
 static llm_error_stage_t transport_stage(const llm_transport_status_t* status) {
     if (status && status->tls_error) return LLM_ERROR_STAGE_TLS;
     return LLM_ERROR_STAGE_TRANSPORT;
@@ -166,9 +207,10 @@ static bool llm_client_headers_init(llm_client_t* client, const char* const* hea
     return true;
 }
 
-llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_model_t* model,
-                                             const llm_timeout_t* timeout, const llm_limits_t* limits,
-                                             const char* const* headers, size_t headers_count) {
+llm_client_t* llm_client_create_with_headers_opts(const char* base_url, const llm_model_t* model,
+                                                  const llm_timeout_t* timeout, const llm_limits_t* limits,
+                                                  const char* const* headers, size_t headers_count,
+                                                  const llm_client_init_opts_t* opts) {
     llm_client_t* client = malloc(sizeof(*client));
     if (!client) return NULL;
     memset(client, 0, sizeof(*client));
@@ -198,6 +240,7 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
     }
     client->tls_verify_peer = true;
     client->tls_verify_host = true;
+    client->last_error_enabled = opts && opts->enable_last_error;
 
     if (!llm_client_headers_init(client, headers, headers_count)) {
         llm_client_destroy(client);
@@ -207,9 +250,20 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
     return client;
 }
 
+llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_model_t* model,
+                                             const llm_timeout_t* timeout, const llm_limits_t* limits,
+                                             const char* const* headers, size_t headers_count) {
+    return llm_client_create_with_headers_opts(base_url, model, timeout, limits, headers, headers_count, NULL);
+}
+
+llm_client_t* llm_client_create_opts(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
+                                     const llm_limits_t* limits, const llm_client_init_opts_t* opts) {
+    return llm_client_create_with_headers_opts(base_url, model, timeout, limits, NULL, 0, opts);
+}
+
 llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
                                 const llm_limits_t* limits) {
-    return llm_client_create_with_headers(base_url, model, timeout, limits, NULL, 0);
+    return llm_client_create_with_headers_opts(base_url, model, timeout, limits, NULL, 0, NULL);
 }
 
 void llm_client_destroy(llm_client_t* client) {
@@ -224,6 +278,7 @@ void llm_client_destroy(llm_client_t* client) {
         free(client->tls_client_key_path);
         free(client->proxy_url);
         free(client->no_proxy);
+        llm_error_detail_free(&client->last_error);
         free(client);
     }
 }
@@ -402,6 +457,11 @@ bool llm_client_set_no_proxy(llm_client_t* client, const char* no_proxy_list) {
     return true;
 }
 
+const llm_error_detail_t* llm_client_last_error(const llm_client_t* client) {
+    if (!client || !client->last_error_enabled) return NULL;
+    return &client->last_error;
+}
+
 struct header_set {
     const char* const* headers;
     size_t count;
@@ -531,13 +591,14 @@ static const llm_tls_config_t* llm_client_tls_config(const llm_client_t* client,
 llm_error_t llm_health_with_headers_ex(llm_client_t* client, const char* const* headers, size_t headers_count,
                                        llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     char url[1024];
     snprintf(url, sizeof(url), "%s/health", client->base_url);
     char* body = NULL;
     size_t len = 0;
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -547,11 +608,12 @@ llm_error_t llm_health_with_headers_ex(llm_client_t* client, const char* const* 
                        client->proxy_url, client->no_proxy, &body, &len, &status);
     header_set_free(&header_set);
     if (!ok) {
-        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     if (status.http_status >= 400) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len,
+                             true);
         return LLM_ERR_FAILED;
     }
     free(body);
@@ -572,8 +634,9 @@ llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models
                                             const char* const* headers, size_t headers_count,
                                             llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     if (!models || !count) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     *models = NULL;
@@ -585,7 +648,7 @@ llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models
     size_t len = 0;
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -594,13 +657,14 @@ llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models
     if (!http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, header_set.headers,
                   header_set.count, tls_ptr, client->proxy_url, client->no_proxy, &body, &len, &status)) {
         header_set_free(&header_set);
-        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     header_set_free(&header_set);
 
     if (status.http_status >= 400) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len,
+                             true);
         return LLM_ERR_FAILED;
     }
 
@@ -610,32 +674,34 @@ llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models
     jstok_init(&parser);
     int needed = jstok_parse(&parser, body, (int)len, NULL, 0);
     if (needed <= 0) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
         return LLM_ERR_FAILED;
     }
     tokens = malloc(needed * sizeof(jstoktok_t));
     if (!tokens) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
         return LLM_ERR_FAILED;
     }
     jstok_init(&parser);
     if (jstok_parse(&parser, body, (int)len, tokens, needed) <= 0) {
         free(tokens);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
         return LLM_ERR_FAILED;
     }
     tok_count = needed;
 
     if (tok_count == 0 || tokens[0].type != JSTOK_OBJECT) {
         free(tokens);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len,
+                             true);
         return LLM_ERR_FAILED;
     }
 
     int data_idx = jstok_object_get(body, tokens, tok_count, 0, "data");
     if (data_idx < 0 || tokens[data_idx].type != JSTOK_ARRAY) {
         free(tokens);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len,
+                             true);
         return LLM_ERR_FAILED;
     }
 
@@ -651,7 +717,7 @@ llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models
     char** out = malloc((size_t)n * sizeof(char*));
     if (!out) {
         free(tokens);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
         return LLM_ERR_FAILED;
     }
 
@@ -686,7 +752,8 @@ llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models
             free(out[i]);
         }
         free(out);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len,
+                             true);
         return LLM_ERR_FAILED;
     }
 
@@ -726,8 +793,9 @@ llm_error_t llm_props_get_with_headers_ex(llm_client_t* client, const char** jso
                                           const char* const* headers, size_t headers_count,
                                           llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     if (!json || !len) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     *json = NULL;
@@ -737,7 +805,7 @@ llm_error_t llm_props_get_with_headers_ex(llm_client_t* client, const char** jso
     snprintf(url, sizeof(url), "%s/props", client->base_url);
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -747,12 +815,12 @@ llm_error_t llm_props_get_with_headers_ex(llm_client_t* client, const char** jso
                        header_set.count, tls_ptr, client->proxy_url, client->no_proxy, (char**)json, len, &status);
     header_set_free(&header_set);
     if (!ok) {
-        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     if (status.http_status >= 400) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, (char*)*json, *len,
-                          true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, (char*)*json,
+                             *len, true);
         *json = NULL;
         *len = 0;
         return LLM_ERR_FAILED;
@@ -791,8 +859,9 @@ llm_error_t llm_completions_with_headers_ex(llm_client_t* client, const char* pr
                                             const char* const* headers, size_t headers_count,
                                             llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     if (!result) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     char url[1024];
@@ -800,7 +869,7 @@ llm_error_t llm_completions_with_headers_ex(llm_client_t* client, const char* pr
 
     char* request_json = build_completions_request(client->model.name, prompt, prompt_len, false, false, params_json);
     if (!request_json) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
 
@@ -809,7 +878,7 @@ llm_error_t llm_completions_with_headers_ex(llm_client_t* client, const char* pr
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -822,12 +891,12 @@ llm_error_t llm_completions_with_headers_ex(llm_client_t* client, const char* pr
     free(request_json);
 
     if (!ok) {
-        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     if (status.http_status >= 400) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, response_body,
-                          response_len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status,
+                             response_body, response_len, true);
         return LLM_ERR_FAILED;
     }
 
@@ -835,7 +904,8 @@ llm_error_t llm_completions_with_headers_ex(llm_client_t* client, const char* pr
     int res = parse_completions_response(response_body, response_len, result);
     if (res < 0) {
         llm_error_stage_t stage = (res == LLM_PARSE_ERR_PROTOCOL) ? LLM_ERROR_STAGE_PROTOCOL : LLM_ERROR_STAGE_JSON;
-        error_detail_fill(detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len,
+                             true);
         return LLM_ERR_FAILED;
     }
     result->_internal = response_body;
@@ -988,6 +1058,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
     const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb, void* abort_user_data, const char* const* headers,
     size_t headers_count, llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
@@ -995,7 +1066,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
     char* request_json =
         build_completions_request(client->model.name, prompt, prompt_len, true, include_usage, params_json);
     if (!request_json) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
 
@@ -1004,7 +1075,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     if (!sse) {
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     sse_set_callback(sse, on_sse_completions_data, &ctx);
@@ -1019,7 +1090,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         sse_destroy(sse);
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -1046,7 +1117,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
         } else {
             stage = transport_stage(&status);
         }
-        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        error_detail_capture(client, detail, err, stage, status.http_status, NULL, 0, false);
         growbuf_free(&capture.buf);
         return err;
     }
@@ -1054,7 +1125,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
         llm_error_t err = (cs.error != LLM_ERR_NONE) ? cs.error : LLM_ERR_FAILED;
         llm_error_stage_t stage =
             (cs.sse_error == SSE_ERR_ABORT || err == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_SSE;
-        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        error_detail_capture(client, detail, err, stage, status.http_status, NULL, 0, false);
         growbuf_free(&capture.buf);
         return err;
     }
@@ -1064,8 +1135,8 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
         if (detail) {
             stream_capture_release(&capture, &err_body, &err_len);
         }
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, err_body, err_len,
-                          true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, err_body,
+                             err_len, true);
         growbuf_free(&capture.buf);
         return LLM_ERR_FAILED;
     }
@@ -1172,8 +1243,9 @@ llm_error_t llm_embeddings_with_headers_ex(llm_client_t* client, const llm_embed
                                            llm_embeddings_result_t* result, const char* const* headers,
                                            size_t headers_count, llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     if (!result) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     char url[1024];
@@ -1183,7 +1255,7 @@ llm_error_t llm_embeddings_with_headers_ex(llm_client_t* client, const llm_embed
         build_embeddings_request(client->model.name, inputs, inputs_count, params_json,
                                  client->limits.max_embedding_input_bytes, client->limits.max_embedding_inputs);
     if (!request_json) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
 
@@ -1192,7 +1264,7 @@ llm_error_t llm_embeddings_with_headers_ex(llm_client_t* client, const llm_embed
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -1205,12 +1277,12 @@ llm_error_t llm_embeddings_with_headers_ex(llm_client_t* client, const llm_embed
     free(request_json);
 
     if (!ok) {
-        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     if (status.http_status >= 400) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, response_body,
-                          response_len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status,
+                             response_body, response_len, true);
         return LLM_ERR_FAILED;
     }
 
@@ -1218,7 +1290,8 @@ llm_error_t llm_embeddings_with_headers_ex(llm_client_t* client, const llm_embed
     int res = parse_embeddings_response(response_body, response_len, result);
     if (res < 0) {
         llm_error_stage_t stage = (res == LLM_PARSE_ERR_PROTOCOL) ? LLM_ERROR_STAGE_PROTOCOL : LLM_ERROR_STAGE_JSON;
-        error_detail_fill(detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len,
+                             true);
         return LLM_ERR_FAILED;
     }
     result->_internal = response_body;
@@ -1255,8 +1328,9 @@ llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* 
                                      const char* response_format_json, llm_chat_result_t* result,
                                      const char* const* headers, size_t headers_count, llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     if (!result) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     char url[1024];
@@ -1265,7 +1339,7 @@ llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* 
     char* request_json = build_chat_request(client->model.name, messages, messages_count, false, false, params_json,
                                             tooling_json, response_format_json);
     if (!request_json) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
 
@@ -1274,7 +1348,7 @@ llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* 
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -1287,12 +1361,12 @@ llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* 
     free(request_json);
 
     if (!ok) {
-        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     if (status.http_status >= 400) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, response_body,
-                          response_len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status,
+                             response_body, response_len, true);
         return LLM_ERR_FAILED;
     }
 
@@ -1300,7 +1374,8 @@ llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* 
     int res = parse_chat_response(response_body, response_len, result);
     if (res < 0) {
         llm_error_stage_t stage = (res == LLM_PARSE_ERR_PROTOCOL) ? LLM_ERROR_STAGE_PROTOCOL : LLM_ERROR_STAGE_JSON;
-        error_detail_fill(detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len, true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len,
+                             true);
         return LLM_ERR_FAILED;
     }
     result->_internal = response_body;
@@ -1661,6 +1736,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                                                           const char* const* headers, size_t headers_count,
                                                           llm_error_detail_t* detail) {
     if (detail) llm_error_detail_free(detail);
+    last_error_reset(client);
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
@@ -1668,7 +1744,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
     char* request_json = build_chat_request(client->model.name, messages, messages_count, true, include_usage,
                                             params_json, tooling_json, response_format_json);
     if (!request_json) {
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
 
@@ -1687,7 +1763,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     if (!sse) {
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     sse_set_callback(sse, on_sse_data, &ctx);
@@ -1698,7 +1774,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         sse_destroy(sse);
         free(request_json);
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
@@ -1742,7 +1818,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
         } else {
             stage = transport_stage(&status);
         }
-        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        error_detail_capture(client, detail, err, stage, status.http_status, NULL, 0, false);
         growbuf_free(&capture.buf);
         return err;
     }
@@ -1750,13 +1826,13 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
         llm_error_t err = (ctx.error != LLM_ERR_NONE) ? ctx.error : LLM_ERR_FAILED;
         llm_error_stage_t stage =
             (cs.sse_error == SSE_ERR_ABORT || err == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_SSE;
-        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        error_detail_capture(client, detail, err, stage, status.http_status, NULL, 0, false);
         growbuf_free(&capture.buf);
         return err;
     }
     if (ctx.error != LLM_ERR_NONE) {
         llm_error_stage_t stage = (ctx.error == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_PROTOCOL;
-        error_detail_fill(detail, ctx.error, stage, status.http_status, NULL, 0, false);
+        error_detail_capture(client, detail, ctx.error, stage, status.http_status, NULL, 0, false);
         growbuf_free(&capture.buf);
         return ctx.error;
     }
@@ -1766,8 +1842,8 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
         if (detail) {
             stream_capture_release(&capture, &err_body, &err_len);
         }
-        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, err_body, err_len,
-                          true);
+        error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, err_body,
+                             err_len, true);
         growbuf_free(&capture.buf);
         return LLM_ERR_FAILED;
     }
@@ -1896,9 +1972,11 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
                                               const char* response_format_json, llm_tool_dispatch_cb dispatch,
                                               void* dispatch_user_data, llm_abort_cb abort_cb, void* abort_user_data,
                                               size_t max_turns, const char* const* headers, size_t headers_count) {
+    last_error_reset(client);
     size_t history_count = initial_count;
     llm_message_t* history = calloc(history_count, sizeof(llm_message_t));
     if (!history) {
+        last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
         return LLM_ERR_FAILED;
     }
 
@@ -1912,6 +1990,7 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
                     llm_message_free_content(&history[j]);
                 }
                 free(history);
+                last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
                 return LLM_ERR_FAILED;
             }
             history[i].content_len = initial_messages[i].content_len;
@@ -1924,6 +2003,7 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
                     llm_message_free_content(&history[j]);
                 }
                 free(history);
+                last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
                 return LLM_ERR_FAILED;
             }
             history[i].tool_call_id_len = initial_messages[i].tool_call_id_len;
@@ -1939,6 +2019,7 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
                     llm_message_free_content(&history[j]);
                 }
                 free(history);
+                last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
                 return LLM_ERR_FAILED;
             }
             memcpy((char*)history[i].tool_calls_json, initial_messages[i].tool_calls_json,
@@ -1949,6 +2030,7 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
 
     if (max_turns == 0) {
         tool_loop_free_history(&history, &history_count);
+        last_error_set_simple_if_empty(client, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL);
         return LLM_ERR_FAILED;
     }
 
@@ -2146,6 +2228,10 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
     }
 
     // Free history copies if we made them
+    if (err != LLM_ERR_NONE) {
+        llm_error_stage_t stage = (err == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_PROTOCOL;
+        last_error_set_simple_if_empty(client, err, stage);
+    }
     tool_loop_free_history(&history, &history_count);
     return err;
 }

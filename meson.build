@@ -217,6 +217,24 @@ if get_option('tests')
   )
   test('error_detail', test_error_detail)
 
+  test_last_error = executable('test_last_error',
+    'tests/test_last_error.c',
+    'src/llm.c',
+    'src/jstok_impl.c',
+    'src/json_core.c',
+    'src/json_build.c',
+    'src/protocol_chat.c',
+    'src/protocol_completions.c',
+    'src/protocol_embeddings.c',
+    'src/sse.c',
+    'src/tools_accum.c',
+    'src/tools_loop.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [jstok_dep],
+    install: false,
+  )
+  test('last_error', test_last_error)
+
   test_cancellation = executable('test_cancellation',
     'tests/test_cancellation.c',
     'src/llm.c',

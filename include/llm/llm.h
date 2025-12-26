@@ -52,6 +52,11 @@ typedef struct llm_tls_config {
     bool insecure;  // explicitly disable verification
 } llm_tls_config_t;
 
+// Client creation options (opt-in behaviors).
+typedef struct {
+    bool enable_last_error;
+} llm_client_init_opts_t;
+
 // Model identifier
 typedef struct {
     const char* name;
@@ -226,6 +231,12 @@ typedef struct {
 typedef bool (*llm_abort_cb)(void* user_data);
 
 // Client creation and destruction
+llm_client_t* llm_client_create_with_headers_opts(const char* base_url, const llm_model_t* model,
+                                                  const llm_timeout_t* timeout, const llm_limits_t* limits,
+                                                  const char* const* headers, size_t headers_count,
+                                                  const llm_client_init_opts_t* opts);
+llm_client_t* llm_client_create_opts(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
+                                     const llm_limits_t* limits, const llm_client_init_opts_t* opts);
 llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
                                 const llm_limits_t* limits);
 // Copies headers into the client. Each entry must be a complete "Header: value" string.
@@ -241,6 +252,10 @@ bool llm_client_set_tls_config(llm_client_t* client, const llm_tls_config_t* tls
 bool llm_client_set_proxy(llm_client_t* client, const char* proxy_url);
 // Copies no-proxy list into the client. Pass NULL or empty to clear.
 bool llm_client_set_no_proxy(llm_client_t* client, const char* no_proxy_list);
+// Returns NULL unless last-error storage was enabled at client creation.
+// The pointer is owned by the client and cleared at the start of each request.
+// Not thread-safe with concurrent requests on the same client.
+const llm_error_detail_t* llm_client_last_error(const llm_client_t* client);
 
 // Error detail lifetime: free any owned raw body buffer.
 void llm_error_detail_free(llm_error_detail_t* detail);
