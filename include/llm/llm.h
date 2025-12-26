@@ -64,6 +64,12 @@ typedef enum {
     LLM_FINISH_REASON_UNKNOWN,
 } llm_finish_reason_t;
 
+typedef enum {
+    LLM_ERR_NONE = 0,
+    LLM_ERR_CANCELLED,
+    LLM_ERR_FAILED,
+} llm_error_t;
+
 // Message role
 typedef enum {
     LLM_ROLE_SYSTEM,
@@ -82,6 +88,9 @@ typedef struct {
     size_t tool_call_id_len;
     const char* name;  // optional (for tool role)
     size_t name_len;
+    // For assistant tool calls (raw JSON array)
+    const char* tool_calls_json;  // optional
+    size_t tool_calls_json_len;
 } llm_message_t;
 
 // Tool call (span-based)
@@ -103,6 +112,8 @@ typedef struct {
     size_t reasoning_content_len;
     llm_tool_call_t* tool_calls;  // array
     size_t tool_calls_count;
+    const char* tool_calls_json;  // raw JSON array
+    size_t tool_calls_json_len;
 } llm_chat_choice_t;
 
 // Chat completion result (non-stream)
@@ -118,6 +129,8 @@ typedef struct {
     size_t reasoning_content_len;
     llm_tool_call_t* tool_calls;  // array
     size_t tool_calls_count;
+    const char* tool_calls_json;  // raw JSON array
+    size_t tool_calls_json_len;
     void* _internal;  // Internal buffer for spans
 } llm_chat_result_t;
 
@@ -153,6 +166,8 @@ typedef struct {
     void (*on_tool_args_complete)(void* user_data, size_t tool_index, const char* args_json, size_t len);
     void (*on_finish_reason)(void* user_data, llm_finish_reason_t reason);
 } llm_stream_callbacks_t;
+
+typedef bool (*llm_abort_cb)(void* user_data);
 
 // Client creation and destruction
 llm_client_t* llm_client_create(const char* base_url, const llm_model_t* model, const llm_timeout_t* timeout,
@@ -238,6 +253,22 @@ bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char
                                                 const char* params_json, size_t choice_index,
                                                 const llm_stream_callbacks_t* callbacks, const char* const* headers,
                                                 size_t headers_count);
+llm_error_t llm_completions_stream_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                      const char* params_json, const llm_stream_callbacks_t* callbacks,
+                                      llm_abort_cb abort_cb, void* abort_user_data);
+llm_error_t llm_completions_stream_with_headers_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                   const char* params_json, const llm_stream_callbacks_t* callbacks,
+                                                   llm_abort_cb abort_cb, void* abort_user_data,
+                                                   const char* const* headers, size_t headers_count);
+llm_error_t llm_completions_stream_choice_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                             const char* params_json, size_t choice_index,
+                                             const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb,
+                                             void* abort_user_data);
+llm_error_t llm_completions_stream_choice_with_headers_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                          const char* params_json, size_t choice_index,
+                                                          const llm_stream_callbacks_t* callbacks,
+                                                          llm_abort_cb abort_cb, void* abort_user_data,
+                                                          const char* const* headers, size_t headers_count);
 
 // Embeddings (non-stream)
 // Returns embedding spans into the response buffer
@@ -278,6 +309,25 @@ bool llm_chat_stream_choice_with_headers(llm_client_t* client, const llm_message
                                          const char* response_format_json, size_t choice_index,
                                          const llm_stream_callbacks_t* callbacks, const char* const* headers,
                                          size_t headers_count);
+llm_error_t llm_chat_stream_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                               const char* params_json, const char* tooling_json, const char* response_format_json,
+                               const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb, void* abort_user_data);
+llm_error_t llm_chat_stream_with_headers_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                            const char* params_json, const char* tooling_json,
+                                            const char* response_format_json, const llm_stream_callbacks_t* callbacks,
+                                            llm_abort_cb abort_cb, void* abort_user_data, const char* const* headers,
+                                            size_t headers_count);
+llm_error_t llm_chat_stream_choice_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                      const char* params_json, const char* tooling_json,
+                                      const char* response_format_json, size_t choice_index,
+                                      const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb,
+                                      void* abort_user_data);
+llm_error_t llm_chat_stream_choice_with_headers_ex(llm_client_t* client, const llm_message_t* messages,
+                                                   size_t messages_count, const char* params_json,
+                                                   const char* tooling_json, const char* response_format_json,
+                                                   size_t choice_index, const llm_stream_callbacks_t* callbacks,
+                                                   llm_abort_cb abort_cb, void* abort_user_data,
+                                                   const char* const* headers, size_t headers_count);
 
 // Tool loop runner
 typedef bool (*llm_tool_dispatch_cb)(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
@@ -289,6 +339,14 @@ bool llm_tool_loop_run(llm_client_t* client, const llm_message_t* initial_messag
 bool llm_tool_loop_run_with_headers(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
                                     const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
                                     size_t max_turns, const char* const* headers, size_t headers_count);
+llm_error_t llm_tool_loop_run_ex(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
+                                 const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
+                                 llm_abort_cb abort_cb, void* abort_user_data, size_t max_turns);
+llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_message_t* initial_messages,
+                                              size_t initial_count, const char* tooling_json,
+                                              llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
+                                              llm_abort_cb abort_cb, void* abort_user_data, size_t max_turns,
+                                              const char* const* headers, size_t headers_count);
 
 // Utility functions
 llm_finish_reason_t llm_finish_reason_from_string(const char* str, size_t len);

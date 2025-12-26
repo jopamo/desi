@@ -49,7 +49,7 @@ Remaining work is about:
     * independent of transport chunking
   * Invalid final JSON must fail with a protocol error
 
-* [ ] **Cancellation**
+* [x] **Cancellation**
 
   * Add a caller-provided abort hook checked at safe points:
 

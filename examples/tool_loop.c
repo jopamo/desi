@@ -65,7 +65,8 @@ int main(void) {
         "}"
         "}]}";
 
-    llm_message_t initial_msg[] = {{LLM_ROLE_USER, "What's the weather like in London today?", 34, NULL, 0, NULL, 0}};
+    llm_message_t initial_msg[] = {
+        {LLM_ROLE_USER, "What's the weather like in London today?", 34, NULL, 0, NULL, 0, NULL, 0}};
 
     printf("User: %s\n", initial_msg[0].content);
 

@@ -95,6 +95,12 @@ char* build_chat_request(const char* model, const llm_message_t* messages, size_
             append_lit(&b, ",\"content\":null");
         }
 
+        if (messages[i].role == LLM_ROLE_ASSISTANT && messages[i].tool_calls_json &&
+            messages[i].tool_calls_json_len > 0) {
+            append_lit(&b, ",\"tool_calls\":");
+            growbuf_append(&b, messages[i].tool_calls_json, messages[i].tool_calls_json_len, 0);
+        }
+
         if (messages[i].role == LLM_ROLE_TOOL && messages[i].tool_call_id) {
             append_lit(&b, ",\"tool_call_id\":");
             append_json_string(&b, messages[i].tool_call_id, messages[i].tool_call_id_len);

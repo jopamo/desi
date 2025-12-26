@@ -72,7 +72,7 @@ int main(void) {
     }
 
     printf("Testing chat (non-stream)...\n");
-    llm_message_t messages[] = {{LLM_ROLE_USER, "What is 2+2?", 11, NULL, 0, NULL, 0}};
+    llm_message_t messages[] = {{LLM_ROLE_USER, "What is 2+2?", 11, NULL, 0, NULL, 0, NULL, 0}};
 
     llm_chat_result_t result;
     if (llm_chat(client, messages, 1, NULL, NULL, NULL, &result)) {
@@ -95,7 +95,7 @@ int main(void) {
         "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get "
         "weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"location\":{\"type\":\"string\"}},"
         "\"required\":[\"location\"]}}}]}";
-    llm_message_t tool_messages[] = {{LLM_ROLE_USER, "What is the weather in London?", 30, NULL, 0, NULL, 0}};
+    llm_message_t tool_messages[] = {{LLM_ROLE_USER, "What is the weather in London?", 30, NULL, 0, NULL, 0, NULL, 0}};
 
     if (llm_tool_loop_run(client, tool_messages, 1, tooling, mock_dispatch, NULL, 3)) {
         printf("Tool loop finished successfully\n");

@@ -102,8 +102,8 @@ static void test_chat_basic(llm_client_t* client) {
     print_sep("9) /v1/chat/completions basic");
     const char* sys = "Return exactly: OK";
     const char* usr = "Do it";
-    llm_message_t msgs[] = {{LLM_ROLE_SYSTEM, sys, strlen(sys), NULL, 0, NULL, 0},
-                            {LLM_ROLE_USER, usr, strlen(usr), NULL, 0, NULL, 0}};
+    llm_message_t msgs[] = {{LLM_ROLE_SYSTEM, sys, strlen(sys), NULL, 0, NULL, 0, NULL, 0},
+                            {LLM_ROLE_USER, usr, strlen(usr), NULL, 0, NULL, 0, NULL, 0}};
 
     llm_chat_result_t res;
     if (llm_chat(client, msgs, 2, "{\"temperature\": 0}", NULL, NULL, &res)) {
@@ -128,7 +128,7 @@ static void stream_content_cb(void* user_data, const char* delta, size_t len) {
 static void test_chat_streaming(llm_client_t* client) {
     print_sep("10) /v1/chat streaming");
     const char* content = "Output exactly: OK";
-    llm_message_t msgs[] = {{LLM_ROLE_USER, content, strlen(content), NULL, 0, NULL, 0}};
+    llm_message_t msgs[] = {{LLM_ROLE_USER, content, strlen(content), NULL, 0, NULL, 0, NULL, 0}};
 
     llm_stream_callbacks_t cbs = {0};
     cbs.on_content_delta = stream_content_cb;
@@ -150,8 +150,8 @@ static void test_tools_call(llm_client_t* client) {
     const char* sys_content = "Call tool add with a=12 and b=30.";
     const char* usr_content = "Go";
 
-    llm_message_t msgs[] = {{LLM_ROLE_SYSTEM, strdup(sys_content), strlen(sys_content), NULL, 0, NULL, 0},
-                            {LLM_ROLE_USER, strdup(usr_content), strlen(usr_content), NULL, 0, NULL, 0}};
+    llm_message_t msgs[] = {{LLM_ROLE_SYSTEM, strdup(sys_content), strlen(sys_content), NULL, 0, NULL, 0, NULL, 0},
+                            {LLM_ROLE_USER, strdup(usr_content), strlen(usr_content), NULL, 0, NULL, 0, NULL, 0}};
 
     // Check for strdup failures
     if (!msgs[0].content || !msgs[1].content) {
@@ -219,7 +219,7 @@ static void test_tool_loop(llm_client_t* client) {
         "]}";
 
     const char* sys_content = "Call tools to compute (12+30)*2. Output RESULT=<val>.";
-    llm_message_t msgs[] = {{LLM_ROLE_SYSTEM, strdup(sys_content), strlen(sys_content), NULL, 0, NULL, 0}};
+    llm_message_t msgs[] = {{LLM_ROLE_SYSTEM, strdup(sys_content), strlen(sys_content), NULL, 0, NULL, 0, NULL, 0}};
 
     // Check for strdup failures
     if (!msgs[0].content) {
@@ -237,7 +237,7 @@ static void test_tool_loop(llm_client_t* client) {
 }
 static void test_json_mode(llm_client_t* client) {
     print_sep("18) response_format json_object");
-    llm_message_t msgs[] = {{LLM_ROLE_USER, "Return JSON with key 'status'='ok'", 34, NULL, 0, NULL, 0}};
+    llm_message_t msgs[] = {{LLM_ROLE_USER, "Return JSON with key 'status'='ok'", 34, NULL, 0, NULL, 0, NULL, 0}};
 
     llm_chat_result_t res;
     if (llm_chat(client, msgs, 1, "{\"temperature\": 0}", NULL, "{\"type\": \"json_object\"}", &res)) {

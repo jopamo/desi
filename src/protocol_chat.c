@@ -105,47 +105,52 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
             choice->reasoning_content_len = sp.len;
         }
         int tool_calls_idx = obj_get_key(tokens, count, message_idx, json, "tool_calls");
-        if (tool_calls_idx >= 0 && tokens[tool_calls_idx].type == JSTOK_ARRAY && tokens[tool_calls_idx].size > 0) {
-            size_t tool_count = (size_t)tokens[tool_calls_idx].size;
-            choice->tool_calls = calloc(tool_count, sizeof(llm_tool_call_t));
-            if (!choice->tool_calls) {
-                free_chat_choices(result->choices, result->choices_count);
-                result->choices = NULL;
-                result->choices_count = 0;
-                free_tokens(tokens);
-                return JSTOK_ERROR_NOMEM;
-            }
-            choice->tool_calls_count = tool_count;
-            for (size_t j = 0; j < tool_count; j++) {
-                int tool_idx = arr_get(tokens, count, tool_calls_idx, (int)j);
-                if (tool_idx < 0 || tokens[tool_idx].type != JSTOK_OBJECT) {
+        if (tool_calls_idx >= 0 && tokens[tool_calls_idx].type == JSTOK_ARRAY) {
+            span_t sp = tok_span(json, &tokens[tool_calls_idx]);
+            choice->tool_calls_json = sp.ptr;
+            choice->tool_calls_json_len = sp.len;
+            if (tokens[tool_calls_idx].size > 0) {
+                size_t tool_count = (size_t)tokens[tool_calls_idx].size;
+                choice->tool_calls = calloc(tool_count, sizeof(llm_tool_call_t));
+                if (!choice->tool_calls) {
                     free_chat_choices(result->choices, result->choices_count);
                     result->choices = NULL;
                     result->choices_count = 0;
                     free_tokens(tokens);
-                    return -1;
+                    return JSTOK_ERROR_NOMEM;
                 }
-                llm_tool_call_t* tc = &choice->tool_calls[j];
-                memset(tc, 0, sizeof(*tc));
-                int id_idx = obj_get_key(tokens, count, tool_idx, json, "id");
-                if (id_idx >= 0 && tokens[id_idx].type == JSTOK_STRING) {
-                    span_t sp = tok_span(json, &tokens[id_idx]);
-                    tc->id = sp.ptr;
-                    tc->id_len = sp.len;
-                }
-                int func_idx = obj_get_key(tokens, count, tool_idx, json, "function");
-                if (func_idx >= 0 && tokens[func_idx].type == JSTOK_OBJECT) {
-                    int name_idx = obj_get_key(tokens, count, func_idx, json, "name");
-                    if (name_idx >= 0 && tokens[name_idx].type == JSTOK_STRING) {
-                        span_t sp = tok_span(json, &tokens[name_idx]);
-                        tc->name = sp.ptr;
-                        tc->name_len = sp.len;
+                choice->tool_calls_count = tool_count;
+                for (size_t j = 0; j < tool_count; j++) {
+                    int tool_idx = arr_get(tokens, count, tool_calls_idx, (int)j);
+                    if (tool_idx < 0 || tokens[tool_idx].type != JSTOK_OBJECT) {
+                        free_chat_choices(result->choices, result->choices_count);
+                        result->choices = NULL;
+                        result->choices_count = 0;
+                        free_tokens(tokens);
+                        return -1;
                     }
-                    int args_idx = obj_get_key(tokens, count, func_idx, json, "arguments");
-                    if (args_idx >= 0 && tokens[args_idx].type == JSTOK_STRING) {
-                        span_t sp = tok_span(json, &tokens[args_idx]);
-                        tc->arguments = sp.ptr;
-                        tc->arguments_len = sp.len;
+                    llm_tool_call_t* tc = &choice->tool_calls[j];
+                    memset(tc, 0, sizeof(*tc));
+                    int id_idx = obj_get_key(tokens, count, tool_idx, json, "id");
+                    if (id_idx >= 0 && tokens[id_idx].type == JSTOK_STRING) {
+                        span_t sp = tok_span(json, &tokens[id_idx]);
+                        tc->id = sp.ptr;
+                        tc->id_len = sp.len;
+                    }
+                    int func_idx = obj_get_key(tokens, count, tool_idx, json, "function");
+                    if (func_idx >= 0 && tokens[func_idx].type == JSTOK_OBJECT) {
+                        int name_idx = obj_get_key(tokens, count, func_idx, json, "name");
+                        if (name_idx >= 0 && tokens[name_idx].type == JSTOK_STRING) {
+                            span_t sp = tok_span(json, &tokens[name_idx]);
+                            tc->name = sp.ptr;
+                            tc->name_len = sp.len;
+                        }
+                        int args_idx = obj_get_key(tokens, count, func_idx, json, "arguments");
+                        if (args_idx >= 0 && tokens[args_idx].type == JSTOK_STRING) {
+                            span_t sp = tok_span(json, &tokens[args_idx]);
+                            tc->arguments = sp.ptr;
+                            tc->arguments_len = sp.len;
+                        }
                     }
                 }
             }
@@ -161,6 +166,8 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
         result->reasoning_content_len = choice0->reasoning_content_len;
         result->tool_calls = choice0->tool_calls;
         result->tool_calls_count = choice0->tool_calls_count;
+        result->tool_calls_json = choice0->tool_calls_json;
+        result->tool_calls_json_len = choice0->tool_calls_json_len;
     }
 
     free_tokens(tokens);

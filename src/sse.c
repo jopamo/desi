@@ -17,6 +17,8 @@ struct sse_parser {
     size_t frame_bytes;
     void* user_data;
     void (*on_data_line)(void* user_data, span_t line);
+    void* frame_user_data;
+    sse_frame_cb on_frame;
     bool is_done;
     int last_error;
 };
@@ -43,6 +45,11 @@ void sse_destroy(sse_parser_t* parser) {
 void sse_set_callback(sse_parser_t* parser, void (*cb)(void* user_data, span_t line), void* user_data) {
     parser->on_data_line = cb;
     parser->user_data = user_data;
+}
+
+void sse_set_frame_callback(sse_parser_t* parser, sse_frame_cb cb, void* user_data) {
+    parser->on_frame = cb;
+    parser->frame_user_data = user_data;
 }
 
 bool sse_is_done(sse_parser_t* parser) { return parser->is_done; }
@@ -114,6 +121,11 @@ int sse_feed(sse_parser_t* parser, const char* chunk, size_t chunk_len) {
         }
 
         if (line_len == 0) {
+            if (parser->on_frame) {
+                if (!parser->on_frame(parser->frame_user_data)) {
+                    return sse_set_error(parser, SSE_ERR_ABORT);
+                }
+            }
             parser->frame_bytes = 0;
             pos = (size_t)(nl - parser->buf) + 1;
             continue;
