@@ -415,7 +415,8 @@ int main(void) {
     snprintf(post_url, sizeof(post_url), "%s/post", base_url);
     char* body = NULL;
     size_t body_len = 0;
-    if (!http_post(post_url, "{}", 1000, 1024, NULL, 0, NULL, proxy_url, NULL, &body, &body_len)) {
+    llm_transport_status_t status;
+    if (!http_post(post_url, "{}", 1000, 1024, NULL, 0, NULL, proxy_url, NULL, &body, &body_len, &status)) {
         fprintf(stderr, "http_post via proxy failed\n");
         ok = false;
         goto cleanup;
@@ -432,7 +433,8 @@ int main(void) {
     char stream_url[256];
     snprintf(stream_url, sizeof(stream_url), "%s/stream", base_url);
     struct stream_capture cap = {0};
-    if (!http_post_stream(stream_url, "{}", 1000, 1000, NULL, 0, NULL, proxy_url, NULL, on_stream_chunk, &cap) ||
+    if (!http_post_stream(stream_url, "{}", 1000, 1000, NULL, 0, NULL, proxy_url, NULL, on_stream_chunk, &cap,
+                          &status) ||
         cap.failed || !cap.data) {
         fprintf(stderr, "http_post_stream via proxy failed\n");
         ok = false;

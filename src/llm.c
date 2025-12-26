@@ -37,9 +37,88 @@ struct llm_client {
     size_t headers_cap;
 };
 
+enum { LLM_ERROR_DETAIL_TOKENS_MAX = 64 };
+
 void llm_client_destroy(llm_client_t* client);
 static bool header_list_validate(const char* const* headers, size_t headers_count);
 static bool header_has_crlf(const char* value);
+
+static void error_detail_clear(llm_error_detail_t* detail) {
+    if (!detail) return;
+    memset(detail, 0, sizeof(*detail));
+    detail->code = LLM_ERR_NONE;
+    detail->stage = LLM_ERROR_STAGE_NONE;
+}
+
+void llm_error_detail_free(llm_error_detail_t* detail) {
+    if (!detail) return;
+    free(detail->_internal);
+    error_detail_clear(detail);
+}
+
+static void error_detail_set_http_status(llm_error_detail_t* detail, long http_status) {
+    if (!detail || http_status <= 0) return;
+    detail->http_status = http_status;
+    detail->has_http_status = true;
+}
+
+static void error_detail_parse_openai(llm_error_detail_t* detail, const char* json, size_t len) {
+    if (!detail || !json || len == 0 || len > (size_t)INT_MAX) return;
+
+    jstoktok_t tokens[LLM_ERROR_DETAIL_TOKENS_MAX];
+    jstok_parser parser;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, (int)LLM_ERROR_DETAIL_TOKENS_MAX);
+    if (parsed <= 0) return;
+    if (tokens[0].type != JSTOK_OBJECT) return;
+
+    int error_idx = jstok_object_get(json, tokens, parsed, 0, "error");
+    if (error_idx < 0 || tokens[error_idx].type != JSTOK_OBJECT) return;
+
+    int msg_idx = jstok_object_get(json, tokens, parsed, error_idx, "message");
+    if (msg_idx >= 0 && tokens[msg_idx].type == JSTOK_STRING) {
+        jstok_span_t sp = jstok_span(json, &tokens[msg_idx]);
+        detail->message = sp.p;
+        detail->message_len = sp.n;
+    }
+    int type_idx = jstok_object_get(json, tokens, parsed, error_idx, "type");
+    if (type_idx >= 0 && tokens[type_idx].type == JSTOK_STRING) {
+        jstok_span_t sp = jstok_span(json, &tokens[type_idx]);
+        detail->type = sp.p;
+        detail->type_len = sp.n;
+    }
+    int code_idx = jstok_object_get(json, tokens, parsed, error_idx, "code");
+    if (code_idx >= 0 && tokens[code_idx].type == JSTOK_STRING) {
+        jstok_span_t sp = jstok_span(json, &tokens[code_idx]);
+        detail->error_code = sp.p;
+        detail->error_code_len = sp.n;
+    }
+}
+
+static void error_detail_fill(llm_error_detail_t* detail, llm_error_t code, llm_error_stage_t stage, long http_status,
+                              char* body, size_t body_len, bool parse_error) {
+    if (!detail) {
+        free(body);
+        return;
+    }
+    llm_error_detail_free(detail);
+    detail->code = code;
+    detail->stage = stage;
+    error_detail_set_http_status(detail, http_status);
+    if (body) {
+        detail->_internal = body;
+        detail->raw_body = body;
+        detail->raw_body_len = body_len;
+        if (parse_error) {
+            error_detail_parse_openai(detail, body, body_len);
+        }
+    }
+}
+
+static llm_error_stage_t transport_stage(const llm_transport_status_t* status) {
+    if (status && status->tls_error) return LLM_ERROR_STAGE_TLS;
+    return LLM_ERROR_STAGE_TRANSPORT;
+}
 
 static void llm_client_headers_free(llm_client_t* client) {
     if (!client) return;
@@ -449,40 +528,81 @@ static const llm_tls_config_t* llm_client_tls_config(const llm_client_t* client,
     return out;
 }
 
-bool llm_health_with_headers(llm_client_t* client, const char* const* headers, size_t headers_count) {
+llm_error_t llm_health_with_headers_ex(llm_client_t* client, const char* const* headers, size_t headers_count,
+                                       llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
     char url[1024];
     snprintf(url, sizeof(url), "%s/health", client->base_url);
     char* body = NULL;
     size_t len = 0;
     struct header_set header_set;
-    if (!llm_header_set_init(&header_set, client, headers, headers_count)) return false;
+    if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    llm_transport_status_t status;
     bool ok = http_get(url, client->timeout.connect_timeout_ms, 1024, header_set.headers, header_set.count, tls_ptr,
-                       client->proxy_url, client->no_proxy, &body, &len);
+                       client->proxy_url, client->no_proxy, &body, &len, &status);
     header_set_free(&header_set);
+    if (!ok) {
+        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
+    if (status.http_status >= 400) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
     free(body);
-    return ok;
+    return LLM_ERR_NONE;
+}
+
+llm_error_t llm_health_ex(llm_client_t* client, llm_error_detail_t* detail) {
+    return llm_health_with_headers_ex(client, NULL, 0, detail);
+}
+
+bool llm_health_with_headers(llm_client_t* client, const char* const* headers, size_t headers_count) {
+    return llm_health_with_headers_ex(client, headers, headers_count, NULL) == LLM_ERR_NONE;
 }
 
 bool llm_health(llm_client_t* client) { return llm_health_with_headers(client, NULL, 0); }
 
-char** llm_models_list_with_headers(llm_client_t* client, size_t* count, const char* const* headers,
-                                    size_t headers_count) {
+llm_error_t llm_models_list_with_headers_ex(llm_client_t* client, char*** models, size_t* count,
+                                            const char* const* headers, size_t headers_count,
+                                            llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
+    if (!models || !count) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
+    *models = NULL;
+    *count = 0;
+
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/models", client->base_url);
     char* body = NULL;
     size_t len = 0;
     struct header_set header_set;
-    if (!llm_header_set_init(&header_set, client, headers, headers_count)) return NULL;
+    if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    llm_transport_status_t status;
     if (!http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, header_set.headers,
-                  header_set.count, tls_ptr, client->proxy_url, client->no_proxy, &body, &len)) {
+                  header_set.count, tls_ptr, client->proxy_url, client->no_proxy, &body, &len, &status)) {
         header_set_free(&header_set);
-        return NULL;
+        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
     }
     header_set_free(&header_set);
+
+    if (status.http_status >= 400) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
 
     jstoktok_t* tokens = NULL;
     int tok_count = 0;
@@ -490,38 +610,102 @@ char** llm_models_list_with_headers(llm_client_t* client, size_t* count, const c
     jstok_init(&parser);
     int needed = jstok_parse(&parser, body, (int)len, NULL, 0);
     if (needed <= 0) {
-        free(body);
-        return NULL;
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
     }
     tokens = malloc(needed * sizeof(jstoktok_t));
+    if (!tokens) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
     jstok_init(&parser);
-    jstok_parse(&parser, body, (int)len, tokens, needed);
+    if (jstok_parse(&parser, body, (int)len, tokens, needed) <= 0) {
+        free(tokens);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
     tok_count = needed;
 
-    char** models = NULL;
-    *count = 0;
+    if (tok_count == 0 || tokens[0].type != JSTOK_OBJECT) {
+        free(tokens);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
 
     int data_idx = jstok_object_get(body, tokens, tok_count, 0, "data");
-    if (data_idx >= 0 && tokens[data_idx].type == JSTOK_ARRAY) {
-        int n = tokens[data_idx].size;
-        models = malloc(n * sizeof(char*));
-        for (int i = 0; i < n; i++) {
-            int m_idx = jstok_array_at(tokens, tok_count, data_idx, i);
-            if (m_idx >= 0 && tokens[m_idx].type == JSTOK_OBJECT) {
-                int id_idx = jstok_object_get(body, tokens, tok_count, m_idx, "id");
-                if (id_idx >= 0 && tokens[id_idx].type == JSTOK_STRING) {
-                    jstok_span_t sp = jstok_span(body, &tokens[id_idx]);
-                    models[*count] = malloc(sp.n + 1);
-                    memcpy(models[*count], sp.p, sp.n);
-                    models[*count][sp.n] = '\0';
-                    (*count)++;
-                }
-            }
+    if (data_idx < 0 || tokens[data_idx].type != JSTOK_ARRAY) {
+        free(tokens);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
+
+    int n = tokens[data_idx].size;
+    if (n <= 0) {
+        free(tokens);
+        free(body);
+        *models = NULL;
+        *count = 0;
+        return LLM_ERR_NONE;
+    }
+
+    char** out = malloc((size_t)n * sizeof(char*));
+    if (!out) {
+        free(tokens);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_JSON, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
+
+    size_t out_count = 0;
+    bool ok = true;
+    for (int i = 0; i < n; i++) {
+        int m_idx = jstok_array_at(tokens, tok_count, data_idx, i);
+        if (m_idx < 0 || tokens[m_idx].type != JSTOK_OBJECT) {
+            ok = false;
+            break;
         }
+        int id_idx = jstok_object_get(body, tokens, tok_count, m_idx, "id");
+        if (id_idx < 0 || tokens[id_idx].type != JSTOK_STRING) {
+            ok = false;
+            break;
+        }
+        jstok_span_t sp = jstok_span(body, &tokens[id_idx]);
+        out[out_count] = malloc(sp.n + 1);
+        if (!out[out_count]) {
+            ok = false;
+            break;
+        }
+        memcpy(out[out_count], sp.p, sp.n);
+        out[out_count][sp.n] = '\0';
+        out_count++;
     }
 
     free(tokens);
+
+    if (!ok) {
+        for (size_t i = 0; i < out_count; i++) {
+            free(out[i]);
+        }
+        free(out);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, body, len, true);
+        return LLM_ERR_FAILED;
+    }
+
     free(body);
+    *models = out;
+    *count = out_count;
+    return LLM_ERR_NONE;
+}
+
+llm_error_t llm_models_list_ex(llm_client_t* client, char*** models, size_t* count, llm_error_detail_t* detail) {
+    return llm_models_list_with_headers_ex(client, models, count, NULL, 0, detail);
+}
+
+char** llm_models_list_with_headers(llm_client_t* client, size_t* count, const char* const* headers,
+                                    size_t headers_count) {
+    char** models = NULL;
+    if (llm_models_list_with_headers_ex(client, &models, count, headers, headers_count, NULL) != LLM_ERR_NONE) {
+        return NULL;
+    }
     return models;
 }
 
@@ -538,18 +722,51 @@ void llm_models_list_free(char** models, size_t count) {
     }
 }
 
-bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t* len, const char* const* headers,
-                                size_t headers_count) {
+llm_error_t llm_props_get_with_headers_ex(llm_client_t* client, const char** json, size_t* len,
+                                          const char* const* headers, size_t headers_count,
+                                          llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
+    if (!json || !len) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
+    *json = NULL;
+    *len = 0;
+
     char url[1024];
     snprintf(url, sizeof(url), "%s/props", client->base_url);
     struct header_set header_set;
-    if (!llm_header_set_init(&header_set, client, headers, headers_count)) return false;
+    if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    llm_transport_status_t status;
     bool ok = http_get(url, client->timeout.connect_timeout_ms, client->limits.max_response_bytes, header_set.headers,
-                       header_set.count, tls_ptr, client->proxy_url, client->no_proxy, (char**)json, len);
+                       header_set.count, tls_ptr, client->proxy_url, client->no_proxy, (char**)json, len, &status);
     header_set_free(&header_set);
-    return ok;
+    if (!ok) {
+        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
+    if (status.http_status >= 400) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, (char*)*json, *len,
+                          true);
+        *json = NULL;
+        *len = 0;
+        return LLM_ERR_FAILED;
+    }
+    return LLM_ERR_NONE;
+}
+
+llm_error_t llm_props_get_ex(llm_client_t* client, const char** json, size_t* len, llm_error_detail_t* detail) {
+    return llm_props_get_with_headers_ex(client, json, len, NULL, 0, detail);
+}
+
+bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t* len, const char* const* headers,
+                                size_t headers_count) {
+    return llm_props_get_with_headers_ex(client, json, len, headers, headers_count, NULL) == LLM_ERR_NONE;
 }
 
 bool llm_props_get(llm_client_t* client, const char** json, size_t* len) {
@@ -569,40 +786,71 @@ int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_i
                                    llm_finish_reason_t* finish_reason, llm_usage_t* usage, bool* usage_present);
 int parse_embeddings_response(const char* json, size_t len, llm_embeddings_result_t* result);
 
-bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
-                                  llm_completions_result_t* result, const char* const* headers, size_t headers_count) {
+llm_error_t llm_completions_with_headers_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                            const char* params_json, llm_completions_result_t* result,
+                                            const char* const* headers, size_t headers_count,
+                                            llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
+    if (!result) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
     char* request_json = build_completions_request(client->model.name, prompt, prompt_len, false, false, params_json);
-    if (!request_json) return false;
+    if (!request_json) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
 
     char* response_body = NULL;
     size_t response_len = 0;
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         free(request_json);
-        return false;
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    llm_transport_status_t status;
     bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
                         header_set.headers, header_set.count, tls_ptr, client->proxy_url, client->no_proxy,
-                        &response_body, &response_len);
+                        &response_body, &response_len, &status);
     header_set_free(&header_set);
     free(request_json);
 
-    if (ok) {
-        memset(result, 0, sizeof(*result));
-        int res = parse_completions_response(response_body, response_len, result);
-        if (res < 0) {
-            free(response_body);
-            ok = false;
-        } else {
-            result->_internal = response_body;
-        }
+    if (!ok) {
+        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
     }
-    return ok;
+    if (status.http_status >= 400) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, response_body,
+                          response_len, true);
+        return LLM_ERR_FAILED;
+    }
+
+    memset(result, 0, sizeof(*result));
+    int res = parse_completions_response(response_body, response_len, result);
+    if (res < 0) {
+        llm_error_stage_t stage = (res == LLM_PARSE_ERR_PROTOCOL) ? LLM_ERROR_STAGE_PROTOCOL : LLM_ERROR_STAGE_JSON;
+        error_detail_fill(detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len, true);
+        return LLM_ERR_FAILED;
+    }
+    result->_internal = response_body;
+    return LLM_ERR_NONE;
+}
+
+llm_error_t llm_completions_ex(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                               llm_completions_result_t* result, llm_error_detail_t* detail) {
+    return llm_completions_with_headers_ex(client, prompt, prompt_len, params_json, result, NULL, 0, detail);
+}
+
+bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                                  llm_completions_result_t* result, const char* const* headers, size_t headers_count) {
+    return llm_completions_with_headers_ex(client, prompt, prompt_len, params_json, result, headers, headers_count,
+                                           NULL) == LLM_ERR_NONE;
 }
 
 bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
@@ -652,6 +900,53 @@ struct sse_stream_ctx {
     llm_error_t error;
 };
 
+struct stream_capture_ctx {
+    stream_cb inner;
+    void* inner_user_data;
+    struct growbuf buf;
+    size_t max_bytes;
+    bool capture;
+};
+
+static void stream_capture_init(struct stream_capture_ctx* cap, stream_cb inner, void* inner_user_data,
+                                size_t max_bytes, bool enable) {
+    memset(cap, 0, sizeof(*cap));
+    cap->inner = inner;
+    cap->inner_user_data = inner_user_data;
+    cap->max_bytes = max_bytes;
+    if (enable) {
+        growbuf_init(&cap->buf, 4096);
+        cap->capture = !cap->buf.nomem;
+        if (!cap->capture) {
+            growbuf_free(&cap->buf);
+        }
+    }
+}
+
+static bool stream_capture_cb(const char* chunk, size_t len, void* user_data) {
+    struct stream_capture_ctx* cap = user_data;
+    if (cap->capture) {
+        if (!growbuf_append(&cap->buf, chunk, len, cap->max_bytes)) {
+            growbuf_free(&cap->buf);
+            cap->capture = false;
+        }
+    }
+    return cap->inner(chunk, len, cap->inner_user_data);
+}
+
+static void stream_capture_release(struct stream_capture_ctx* cap, char** body, size_t* len) {
+    if (!body || !len) return;
+    *body = NULL;
+    *len = 0;
+    if (!cap->capture || !cap->buf.data) return;
+    *body = cap->buf.data;
+    *len = cap->buf.len;
+    cap->buf.data = NULL;
+    cap->buf.len = 0;
+    cap->buf.cap = 0;
+    cap->capture = false;
+}
+
 static bool on_sse_frame_abort(void* user_data) {
     struct sse_stream_ctx* cs = user_data;
     if (cs->abort_cb && cs->abort_cb(cs->abort_user_data)) {
@@ -688,25 +983,28 @@ static bool sse_stream_cb(const char* chunk, size_t len, void* user_data) {
     return true;
 }
 
-static llm_error_t llm_completions_stream_with_headers_choice_ex(llm_client_t* client, const char* prompt,
-                                                                 size_t prompt_len, const char* params_json,
-                                                                 size_t choice_index,
-                                                                 const llm_stream_callbacks_t* callbacks,
-                                                                 llm_abort_cb abort_cb, void* abort_user_data,
-                                                                 const char* const* headers, size_t headers_count) {
+static llm_error_t llm_completions_stream_with_headers_choice_ex(
+    llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json, size_t choice_index,
+    const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb, void* abort_user_data, const char* const* headers,
+    size_t headers_count, llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
     const bool include_usage = callbacks && callbacks->include_usage;
     char* request_json =
         build_completions_request(client->model.name, prompt, prompt_len, true, include_usage, params_json);
-    if (!request_json) return LLM_ERR_FAILED;
+    if (!request_json) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
 
     struct completions_stream_ctx ctx = {callbacks, choice_index, include_usage};
     sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_frame_bytes,
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     if (!sse) {
         free(request_json);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     sse_set_callback(sse, on_sse_completions_data, &ctx);
@@ -721,25 +1019,57 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(llm_client_t* c
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         sse_destroy(sse);
         free(request_json);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    struct stream_capture_ctx capture;
+    stream_capture_init(&capture, sse_stream_cb, &cs, client->limits.max_response_bytes, detail != NULL);
+    stream_cb cb = detail ? stream_capture_cb : sse_stream_cb;
+    void* cb_user_data = detail ? (void*)&capture : (void*)&cs;
+    llm_transport_status_t status;
     bool ok = http_post_stream(url, request_json, client->timeout.overall_timeout_ms,
                                client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
-                               client->proxy_url, client->no_proxy, sse_stream_cb, &cs);
+                               client->proxy_url, client->no_proxy, cb, cb_user_data, &status);
     header_set_free(&header_set);
     sse_destroy(sse);
     free(request_json);
 
     if (!ok) {
-        if (cs.error != LLM_ERR_NONE) return cs.error;
-        return LLM_ERR_FAILED;
+        llm_error_t err = (cs.error != LLM_ERR_NONE) ? cs.error : LLM_ERR_FAILED;
+        llm_error_stage_t stage = LLM_ERROR_STAGE_TRANSPORT;
+        if (err == LLM_ERR_CANCELLED) {
+            stage = LLM_ERROR_STAGE_NONE;
+        } else if (cs.sse_error != SSE_OK && cs.sse_error != SSE_ERR_ABORT) {
+            stage = LLM_ERROR_STAGE_SSE;
+        } else {
+            stage = transport_stage(&status);
+        }
+        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        growbuf_free(&capture.buf);
+        return err;
     }
     if (cs.sse_error != SSE_OK) {
-        if (cs.error != LLM_ERR_NONE) return cs.error;
+        llm_error_t err = (cs.error != LLM_ERR_NONE) ? cs.error : LLM_ERR_FAILED;
+        llm_error_stage_t stage =
+            (cs.sse_error == SSE_ERR_ABORT || err == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_SSE;
+        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        growbuf_free(&capture.buf);
+        return err;
+    }
+    if (status.http_status >= 400) {
+        char* err_body = NULL;
+        size_t err_len = 0;
+        if (detail) {
+            stream_capture_release(&capture, &err_body, &err_len);
+        }
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, err_body, err_len,
+                          true);
+        growbuf_free(&capture.buf);
         return LLM_ERR_FAILED;
     }
+    growbuf_free(&capture.buf);
     return LLM_ERR_NONE;
 }
 
@@ -747,7 +1077,7 @@ bool llm_completions_stream_with_headers(llm_client_t* client, const char* promp
                                          const char* params_json, const llm_stream_callbacks_t* callbacks,
                                          const char* const* headers, size_t headers_count) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, 0, callbacks, NULL,
-                                                         NULL, headers, headers_count) == LLM_ERR_NONE;
+                                                         NULL, headers, headers_count, NULL) == LLM_ERR_NONE;
 }
 
 bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
@@ -758,7 +1088,7 @@ bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t pro
 bool llm_completions_stream_choice(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
                                    size_t choice_index, const llm_stream_callbacks_t* callbacks) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, choice_index,
-                                                         callbacks, NULL, NULL, NULL, 0) == LLM_ERR_NONE;
+                                                         callbacks, NULL, NULL, NULL, 0, NULL) == LLM_ERR_NONE;
 }
 
 bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
@@ -766,14 +1096,15 @@ bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char
                                                 const llm_stream_callbacks_t* callbacks, const char* const* headers,
                                                 size_t headers_count) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, choice_index,
-                                                         callbacks, NULL, NULL, headers, headers_count) == LLM_ERR_NONE;
+                                                         callbacks, NULL, NULL, headers, headers_count,
+                                                         NULL) == LLM_ERR_NONE;
 }
 
 llm_error_t llm_completions_stream_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
                                       const char* params_json, const llm_stream_callbacks_t* callbacks,
                                       llm_abort_cb abort_cb, void* abort_user_data) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, 0, callbacks,
-                                                         abort_cb, abort_user_data, NULL, 0);
+                                                         abort_cb, abort_user_data, NULL, 0, NULL);
 }
 
 llm_error_t llm_completions_stream_with_headers_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
@@ -781,7 +1112,7 @@ llm_error_t llm_completions_stream_with_headers_ex(llm_client_t* client, const c
                                                    llm_abort_cb abort_cb, void* abort_user_data,
                                                    const char* const* headers, size_t headers_count) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, 0, callbacks,
-                                                         abort_cb, abort_user_data, headers, headers_count);
+                                                         abort_cb, abort_user_data, headers, headers_count, NULL);
 }
 
 llm_error_t llm_completions_stream_choice_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
@@ -789,7 +1120,7 @@ llm_error_t llm_completions_stream_choice_ex(llm_client_t* client, const char* p
                                              const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb,
                                              void* abort_user_data) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, choice_index,
-                                                         callbacks, abort_cb, abort_user_data, NULL, 0);
+                                                         callbacks, abort_cb, abort_user_data, NULL, 0, NULL);
 }
 
 llm_error_t llm_completions_stream_choice_with_headers_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
@@ -798,46 +1129,112 @@ llm_error_t llm_completions_stream_choice_with_headers_ex(llm_client_t* client, 
                                                           llm_abort_cb abort_cb, void* abort_user_data,
                                                           const char* const* headers, size_t headers_count) {
     return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, choice_index,
-                                                         callbacks, abort_cb, abort_user_data, headers, headers_count);
+                                                         callbacks, abort_cb, abort_user_data, headers, headers_count,
+                                                         NULL);
 }
 
-bool llm_embeddings_with_headers(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
-                                 const char* params_json, llm_embeddings_result_t* result, const char* const* headers,
-                                 size_t headers_count) {
+llm_error_t llm_completions_stream_detail_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                             const char* params_json, const llm_stream_callbacks_t* callbacks,
+                                             llm_abort_cb abort_cb, void* abort_user_data, llm_error_detail_t* detail) {
+    return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, 0, callbacks,
+                                                         abort_cb, abort_user_data, NULL, 0, detail);
+}
+
+llm_error_t llm_completions_stream_with_headers_detail_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                          const char* params_json,
+                                                          const llm_stream_callbacks_t* callbacks,
+                                                          llm_abort_cb abort_cb, void* abort_user_data,
+                                                          const char* const* headers, size_t headers_count,
+                                                          llm_error_detail_t* detail) {
+    return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, 0, callbacks,
+                                                         abort_cb, abort_user_data, headers, headers_count, detail);
+}
+
+llm_error_t llm_completions_stream_choice_detail_ex(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                    const char* params_json, size_t choice_index,
+                                                    const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb,
+                                                    void* abort_user_data, llm_error_detail_t* detail) {
+    return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, choice_index,
+                                                         callbacks, abort_cb, abort_user_data, NULL, 0, detail);
+}
+
+llm_error_t llm_completions_stream_choice_with_headers_detail_ex(
+    llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json, size_t choice_index,
+    const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb, void* abort_user_data, const char* const* headers,
+    size_t headers_count, llm_error_detail_t* detail) {
+    return llm_completions_stream_with_headers_choice_ex(client, prompt, prompt_len, params_json, choice_index,
+                                                         callbacks, abort_cb, abort_user_data, headers, headers_count,
+                                                         detail);
+}
+
+llm_error_t llm_embeddings_with_headers_ex(llm_client_t* client, const llm_embedding_input_t* inputs,
+                                           size_t inputs_count, const char* params_json,
+                                           llm_embeddings_result_t* result, const char* const* headers,
+                                           size_t headers_count, llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
+    if (!result) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/embeddings", client->base_url);
 
     char* request_json =
         build_embeddings_request(client->model.name, inputs, inputs_count, params_json,
                                  client->limits.max_embedding_input_bytes, client->limits.max_embedding_inputs);
-    if (!request_json) return false;
+    if (!request_json) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
 
     char* response_body = NULL;
     size_t response_len = 0;
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         free(request_json);
-        return false;
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    llm_transport_status_t status;
     bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
                         header_set.headers, header_set.count, tls_ptr, client->proxy_url, client->no_proxy,
-                        &response_body, &response_len);
+                        &response_body, &response_len, &status);
     header_set_free(&header_set);
     free(request_json);
 
-    if (ok) {
-        memset(result, 0, sizeof(*result));
-        int res = parse_embeddings_response(response_body, response_len, result);
-        if (res < 0) {
-            free(response_body);
-            ok = false;
-        } else {
-            result->_internal = response_body;
-        }
+    if (!ok) {
+        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
     }
-    return ok;
+    if (status.http_status >= 400) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, response_body,
+                          response_len, true);
+        return LLM_ERR_FAILED;
+    }
+
+    memset(result, 0, sizeof(*result));
+    int res = parse_embeddings_response(response_body, response_len, result);
+    if (res < 0) {
+        llm_error_stage_t stage = (res == LLM_PARSE_ERR_PROTOCOL) ? LLM_ERROR_STAGE_PROTOCOL : LLM_ERROR_STAGE_JSON;
+        error_detail_fill(detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len, true);
+        return LLM_ERR_FAILED;
+    }
+    result->_internal = response_body;
+    return LLM_ERR_NONE;
+}
+
+llm_error_t llm_embeddings_ex(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
+                              const char* params_json, llm_embeddings_result_t* result, llm_error_detail_t* detail) {
+    return llm_embeddings_with_headers_ex(client, inputs, inputs_count, params_json, result, NULL, 0, detail);
+}
+
+bool llm_embeddings_with_headers(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
+                                 const char* params_json, llm_embeddings_result_t* result, const char* const* headers,
+                                 size_t headers_count) {
+    return llm_embeddings_with_headers_ex(client, inputs, inputs_count, params_json, result, headers, headers_count,
+                                          NULL) == LLM_ERR_NONE;
 }
 
 bool llm_embeddings(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
@@ -853,43 +1250,75 @@ void llm_embeddings_free(llm_embeddings_result_t* result) {
     }
 }
 
-bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
-                           const char* params_json, const char* tooling_json, const char* response_format_json,
-                           llm_chat_result_t* result, const char* const* headers, size_t headers_count) {
+llm_error_t llm_chat_with_headers_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                     const char* params_json, const char* tooling_json,
+                                     const char* response_format_json, llm_chat_result_t* result,
+                                     const char* const* headers, size_t headers_count, llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
+    if (!result) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
     char* request_json = build_chat_request(client->model.name, messages, messages_count, false, false, params_json,
                                             tooling_json, response_format_json);
-    if (!request_json) return false;
+    if (!request_json) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
 
     char* response_body = NULL;
     size_t response_len = 0;
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         free(request_json);
-        return false;
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    llm_transport_status_t status;
     bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
                         header_set.headers, header_set.count, tls_ptr, client->proxy_url, client->no_proxy,
-                        &response_body, &response_len);
+                        &response_body, &response_len, &status);
     header_set_free(&header_set);
     free(request_json);
 
-    if (ok) {
-        memset(result, 0, sizeof(*result));
-        int res = parse_chat_response(response_body, response_len, result);
-        if (res < 0) {
-            free(response_body);
-            ok = false;
-        } else {
-            result->_internal = response_body;
-        }
+    if (!ok) {
+        error_detail_fill(detail, LLM_ERR_FAILED, transport_stage(&status), 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
+    if (status.http_status >= 400) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, response_body,
+                          response_len, true);
+        return LLM_ERR_FAILED;
     }
 
-    return ok;
+    memset(result, 0, sizeof(*result));
+    int res = parse_chat_response(response_body, response_len, result);
+    if (res < 0) {
+        llm_error_stage_t stage = (res == LLM_PARSE_ERR_PROTOCOL) ? LLM_ERROR_STAGE_PROTOCOL : LLM_ERROR_STAGE_JSON;
+        error_detail_fill(detail, LLM_ERR_FAILED, stage, status.http_status, response_body, response_len, true);
+        return LLM_ERR_FAILED;
+    }
+    result->_internal = response_body;
+    return LLM_ERR_NONE;
+}
+
+llm_error_t llm_chat_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                        const char* params_json, const char* tooling_json, const char* response_format_json,
+                        llm_chat_result_t* result, llm_error_detail_t* detail) {
+    return llm_chat_with_headers_ex(client, messages, messages_count, params_json, tooling_json, response_format_json,
+                                    result, NULL, 0, detail);
+}
+
+bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                           const char* params_json, const char* tooling_json, const char* response_format_json,
+                           llm_chat_result_t* result, const char* const* headers, size_t headers_count) {
+    return llm_chat_with_headers_ex(client, messages, messages_count, params_json, tooling_json, response_format_json,
+                                    result, headers, headers_count, NULL) == LLM_ERR_NONE;
 }
 
 bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messages_count, const char* params_json,
@@ -1229,14 +1658,19 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                                                           const char* tooling_json, const char* response_format_json,
                                                           size_t choice_index, const llm_stream_callbacks_t* callbacks,
                                                           llm_abort_cb abort_cb, void* abort_user_data,
-                                                          const char* const* headers, size_t headers_count) {
+                                                          const char* const* headers, size_t headers_count,
+                                                          llm_error_detail_t* detail) {
+    if (detail) llm_error_detail_free(detail);
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
     const bool include_usage = callbacks && callbacks->include_usage;
     char* request_json = build_chat_request(client->model.name, messages, messages_count, true, include_usage,
                                             params_json, tooling_json, response_format_json);
-    if (!request_json) return LLM_ERR_FAILED;
+    if (!request_json) {
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
+        return LLM_ERR_FAILED;
+    }
 
     struct stream_ctx ctx = {.callbacks = callbacks,
                              .choice_index = choice_index,
@@ -1253,6 +1687,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     if (!sse) {
         free(request_json);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     sse_set_callback(sse, on_sse_data, &ctx);
@@ -1263,13 +1698,19 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         sse_destroy(sse);
         free(request_json);
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
     llm_tls_config_t tls;
     const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    struct stream_capture_ctx capture;
+    stream_capture_init(&capture, curl_stream_cb, &cs, client->limits.max_response_bytes, detail != NULL);
+    stream_cb cb = detail ? stream_capture_cb : curl_stream_cb;
+    void* cb_user_data = detail ? (void*)&capture : (void*)&cs;
+    llm_transport_status_t status;
     bool ok = http_post_stream(url, request_json, client->timeout.overall_timeout_ms,
                                client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
-                               client->proxy_url, client->no_proxy, curl_stream_cb, &cs);
+                               client->proxy_url, client->no_proxy, cb, cb_user_data, &status);
     header_set_free(&header_set);
     if (ok && !ctx.tool_calls_finalized && sse_is_done(sse)) {
         if (!finalize_tool_calls(&ctx)) {
@@ -1290,14 +1731,47 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
     free(request_json);
 
     if (!ok) {
-        if (ctx.error != LLM_ERR_NONE) return ctx.error;
-        return LLM_ERR_FAILED;
+        llm_error_t err = (ctx.error != LLM_ERR_NONE) ? ctx.error : LLM_ERR_FAILED;
+        llm_error_stage_t stage = LLM_ERROR_STAGE_TRANSPORT;
+        if (err == LLM_ERR_CANCELLED) {
+            stage = LLM_ERROR_STAGE_NONE;
+        } else if (ctx.protocol_error) {
+            stage = LLM_ERROR_STAGE_PROTOCOL;
+        } else if (cs.sse_error != SSE_OK && cs.sse_error != SSE_ERR_ABORT) {
+            stage = LLM_ERROR_STAGE_SSE;
+        } else {
+            stage = transport_stage(&status);
+        }
+        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        growbuf_free(&capture.buf);
+        return err;
     }
     if (cs.sse_error != SSE_OK) {
-        if (ctx.error != LLM_ERR_NONE) return ctx.error;
+        llm_error_t err = (ctx.error != LLM_ERR_NONE) ? ctx.error : LLM_ERR_FAILED;
+        llm_error_stage_t stage =
+            (cs.sse_error == SSE_ERR_ABORT || err == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_SSE;
+        error_detail_fill(detail, err, stage, status.http_status, NULL, 0, false);
+        growbuf_free(&capture.buf);
+        return err;
+    }
+    if (ctx.error != LLM_ERR_NONE) {
+        llm_error_stage_t stage = (ctx.error == LLM_ERR_CANCELLED) ? LLM_ERROR_STAGE_NONE : LLM_ERROR_STAGE_PROTOCOL;
+        error_detail_fill(detail, ctx.error, stage, status.http_status, NULL, 0, false);
+        growbuf_free(&capture.buf);
+        return ctx.error;
+    }
+    if (status.http_status >= 400) {
+        char* err_body = NULL;
+        size_t err_len = 0;
+        if (detail) {
+            stream_capture_release(&capture, &err_body, &err_len);
+        }
+        error_detail_fill(detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, status.http_status, err_body, err_len,
+                          true);
+        growbuf_free(&capture.buf);
         return LLM_ERR_FAILED;
     }
-    if (ctx.error != LLM_ERR_NONE) return ctx.error;
+    growbuf_free(&capture.buf);
     return LLM_ERR_NONE;
 }
 
@@ -1307,7 +1781,7 @@ bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* mes
                                   size_t headers_count) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
                                                   response_format_json, 0, callbacks, NULL, NULL, headers,
-                                                  headers_count) == LLM_ERR_NONE;
+                                                  headers_count, NULL) == LLM_ERR_NONE;
 }
 
 bool llm_chat_stream(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -1321,8 +1795,8 @@ bool llm_chat_stream_choice(llm_client_t* client, const llm_message_t* messages,
                             const char* params_json, const char* tooling_json, const char* response_format_json,
                             size_t choice_index, const llm_stream_callbacks_t* callbacks) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
-                                                  response_format_json, choice_index, callbacks, NULL, NULL, NULL,
-                                                  0) == LLM_ERR_NONE;
+                                                  response_format_json, choice_index, callbacks, NULL, NULL, NULL, 0,
+                                                  NULL) == LLM_ERR_NONE;
 }
 
 bool llm_chat_stream_choice_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -1332,7 +1806,7 @@ bool llm_chat_stream_choice_with_headers(llm_client_t* client, const llm_message
                                          size_t headers_count) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
                                                   response_format_json, choice_index, callbacks, NULL, NULL, headers,
-                                                  headers_count) == LLM_ERR_NONE;
+                                                  headers_count, NULL) == LLM_ERR_NONE;
 }
 
 llm_error_t llm_chat_stream_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -1340,7 +1814,7 @@ llm_error_t llm_chat_stream_ex(llm_client_t* client, const llm_message_t* messag
                                const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb, void* abort_user_data) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
                                                   response_format_json, 0, callbacks, abort_cb, abort_user_data, NULL,
-                                                  0);
+                                                  0, NULL);
 }
 
 llm_error_t llm_chat_stream_with_headers_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -1350,7 +1824,7 @@ llm_error_t llm_chat_stream_with_headers_ex(llm_client_t* client, const llm_mess
                                             size_t headers_count) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
                                                   response_format_json, 0, callbacks, abort_cb, abort_user_data,
-                                                  headers, headers_count);
+                                                  headers, headers_count, NULL);
 }
 
 llm_error_t llm_chat_stream_choice_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -1360,7 +1834,7 @@ llm_error_t llm_chat_stream_choice_ex(llm_client_t* client, const llm_message_t*
                                       void* abort_user_data) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
                                                   response_format_json, choice_index, callbacks, abort_cb,
-                                                  abort_user_data, NULL, 0);
+                                                  abort_user_data, NULL, 0, NULL);
 }
 
 llm_error_t llm_chat_stream_choice_with_headers_ex(llm_client_t* client, const llm_message_t* messages,
@@ -1371,7 +1845,49 @@ llm_error_t llm_chat_stream_choice_with_headers_ex(llm_client_t* client, const l
                                                    const char* const* headers, size_t headers_count) {
     return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
                                                   response_format_json, choice_index, callbacks, abort_cb,
-                                                  abort_user_data, headers, headers_count);
+                                                  abort_user_data, headers, headers_count, NULL);
+}
+
+llm_error_t llm_chat_stream_detail_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                      const char* params_json, const char* tooling_json,
+                                      const char* response_format_json, const llm_stream_callbacks_t* callbacks,
+                                      llm_abort_cb abort_cb, void* abort_user_data, llm_error_detail_t* detail) {
+    return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
+                                                  response_format_json, 0, callbacks, abort_cb, abort_user_data, NULL,
+                                                  0, detail);
+}
+
+llm_error_t llm_chat_stream_with_headers_detail_ex(llm_client_t* client, const llm_message_t* messages,
+                                                   size_t messages_count, const char* params_json,
+                                                   const char* tooling_json, const char* response_format_json,
+                                                   const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb,
+                                                   void* abort_user_data, const char* const* headers,
+                                                   size_t headers_count, llm_error_detail_t* detail) {
+    return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
+                                                  response_format_json, 0, callbacks, abort_cb, abort_user_data,
+                                                  headers, headers_count, detail);
+}
+
+llm_error_t llm_chat_stream_choice_detail_ex(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                             const char* params_json, const char* tooling_json,
+                                             const char* response_format_json, size_t choice_index,
+                                             const llm_stream_callbacks_t* callbacks, llm_abort_cb abort_cb,
+                                             void* abort_user_data, llm_error_detail_t* detail) {
+    return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
+                                                  response_format_json, choice_index, callbacks, abort_cb,
+                                                  abort_user_data, NULL, 0, detail);
+}
+
+llm_error_t llm_chat_stream_choice_with_headers_detail_ex(llm_client_t* client, const llm_message_t* messages,
+                                                          size_t messages_count, const char* params_json,
+                                                          const char* tooling_json, const char* response_format_json,
+                                                          size_t choice_index, const llm_stream_callbacks_t* callbacks,
+                                                          llm_abort_cb abort_cb, void* abort_user_data,
+                                                          const char* const* headers, size_t headers_count,
+                                                          llm_error_detail_t* detail) {
+    return llm_chat_stream_with_headers_choice_ex(client, messages, messages_count, params_json, tooling_json,
+                                                  response_format_json, choice_index, callbacks, abort_cb,
+                                                  abort_user_data, headers, headers_count, detail);
 }
 
 // Tool loop implementation is usually complex, let's put a simplified version here

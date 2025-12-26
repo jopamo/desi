@@ -1,7 +1,3 @@
-Here’s a **cleaned and tightened TODO** with **all completed items removed**, scope sharpened, and wording adjusted to better reflect execution order and invariants. Nothing new is added, only clarification and de-duplication.
-
----
-
 # desi – Remaining Implementation TODO
 
 This document tracks **unfinished and follow-on work** to complete and harden `desi`, a minimal C LLM client and MCP server built on **`jstok` strictly as a tokenizer/validator**.
@@ -144,7 +140,7 @@ Remaining work is about:
 
 ### Tasks
 
-* [ ] **Unified structured error**
+* [x] **Unified structured error**
 
   * Define `llm_error_detail_t` containing:
 
@@ -156,7 +152,7 @@ Remaining work is about:
   * Spans must reference transport-owned buffers where possible
   * Copying must always be explicit
 
-* [ ] **OpenAI-style error parsing**
+* [x] **OpenAI-style error parsing**
 
   * Best-effort extraction of:
 

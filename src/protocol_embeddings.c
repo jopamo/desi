@@ -36,7 +36,7 @@ int parse_embeddings_response(const char* json, size_t len, llm_embeddings_resul
 
     if (count == 0 || tokens[0].type != JSTOK_OBJECT) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     memset(result, 0, sizeof(*result));
@@ -44,7 +44,7 @@ int parse_embeddings_response(const char* json, size_t len, llm_embeddings_resul
     int data_idx = obj_get_key(tokens, count, 0, json, "data");
     if (data_idx < 0 || tokens[data_idx].type != JSTOK_ARRAY || tokens[data_idx].size <= 0) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     size_t data_count = (size_t)tokens[data_idx].size;
@@ -62,7 +62,7 @@ int parse_embeddings_response(const char* json, size_t len, llm_embeddings_resul
             result->data = NULL;
             result->data_count = 0;
             free_tokens(tokens);
-            return -1;
+            return LLM_PARSE_ERR_PROTOCOL;
         }
         int embedding_idx = obj_get_key(tokens, count, item_idx, json, "embedding");
         if (embedding_idx < 0 || tokens[embedding_idx].type != JSTOK_ARRAY) {
@@ -70,7 +70,7 @@ int parse_embeddings_response(const char* json, size_t len, llm_embeddings_resul
             result->data = NULL;
             result->data_count = 0;
             free_tokens(tokens);
-            return -1;
+            return LLM_PARSE_ERR_PROTOCOL;
         }
         span_t sp = tok_span(json, &tokens[embedding_idx]);
         result->data[i].embedding = sp.ptr;

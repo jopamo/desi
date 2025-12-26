@@ -731,21 +731,26 @@ int main(void) {
 
     const char* error_json = NULL;
     size_t error_len = 0;
-    if (!llm_props_get(noauth_client, &error_json, &error_len)) {
-        fprintf(stderr, "Props request without auth failed\n");
+    llm_error_detail_t detail = {0};
+    llm_error_t err = llm_props_get_ex(noauth_client, &error_json, &error_len, &detail);
+    if (err == LLM_ERR_NONE) {
+        fprintf(stderr, "Props request without auth should fail\n");
+        if (error_json) free((char*)error_json);
+        llm_error_detail_free(&detail);
         llm_client_destroy(noauth_client);
         llm_client_destroy(client);
         stop_server(pid);
         return 1;
     }
-    if (!assert_error_json(error_json, error_len, "missing api key", "auth_error", "missing_api_key")) {
-        free((char*)error_json);
+    if (!detail.raw_body ||
+        !assert_error_json(detail.raw_body, detail.raw_body_len, "missing api key", "auth_error", "missing_api_key")) {
+        llm_error_detail_free(&detail);
         llm_client_destroy(noauth_client);
         llm_client_destroy(client);
         stop_server(pid);
         return 1;
     }
-    free((char*)error_json);
+    llm_error_detail_free(&detail);
     llm_client_destroy(noauth_client);
 
     llm_client_destroy(client);

@@ -10,11 +10,43 @@ struct write_ctx {
     size_t max_bytes;
 };
 
+static void transport_status_init(llm_transport_status_t* status) {
+    if (!status) return;
+    status->http_status = 0;
+    status->curl_code = 0;
+    status->tls_error = false;
+}
+
 static struct curl_slist* append_headers(struct curl_slist* list, const char* const* headers, size_t headers_count) {
     for (size_t i = 0; i < headers_count; i++) {
         list = curl_slist_append(list, headers[i]);
     }
     return list;
+}
+
+static bool curl_is_tls_error(CURLcode code) {
+    switch (code) {
+        case CURLE_SSL_CONNECT_ERROR:
+        case CURLE_SSL_CERTPROBLEM:
+        case CURLE_SSL_CACERT:
+        case CURLE_SSL_CACERT_BADFILE:
+        case CURLE_SSL_ISSUER_ERROR:
+        case CURLE_SSL_CIPHER:
+        case CURLE_SSL_ENGINE_INITFAILED:
+        case CURLE_SSL_ENGINE_SETFAILED:
+        case CURLE_SSL_CRL_BADFILE:
+        case CURLE_SSL_SHUTDOWN_FAILED:
+        case CURLE_SSL_INVALIDCERTSTATUS:
+        case CURLE_SSL_PINNEDPUBKEYNOTMATCH:
+#if defined(CURLE_PEER_FAILED_VERIFICATION) && (CURLE_PEER_FAILED_VERIFICATION != CURLE_SSL_CACERT)
+        case CURLE_PEER_FAILED_VERIFICATION:
+#endif
+        case CURLE_SSL_CLIENTCERT:
+        case CURLE_USE_SSL_FAILED:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static bool resolve_verify_mode(llm_tls_verify_mode_t mode, bool default_value) {
@@ -119,9 +151,10 @@ static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
 
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
               size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len) {
+              char** body, size_t* len, llm_transport_status_t* status) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
+    transport_status_init(status);
 
     struct growbuf buf;
     growbuf_init(&buf, 4096);
@@ -133,6 +166,10 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     if (!apply_tls_config(curl, tls, key_pass_buf, sizeof(key_pass_buf))) {
+        if (status) {
+            status->tls_error = true;
+            status->curl_code = CURLE_SSL_CONNECT_ERROR;
+        }
         curl_slist_free_all(header_list);
         curl_easy_cleanup(curl);
         growbuf_free(&buf);
@@ -151,6 +188,14 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
     CURLcode res = curl_easy_perform(curl);
     bool success = (res == CURLE_OK);
+    if (status) {
+        status->curl_code = res;
+        if (success) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status->http_status);
+        } else {
+            status->tls_error = curl_is_tls_error(res);
+        }
+    }
 
     if (success) {
         // Null terminate for convenience if there's space, but don't count it in len
@@ -173,9 +218,10 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
 bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
                const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len) {
+               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
+    transport_status_init(status);
 
     struct growbuf buf;
     growbuf_init(&buf, 4096);
@@ -188,6 +234,10 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     if (!apply_tls_config(curl, tls, key_pass_buf, sizeof(key_pass_buf))) {
+        if (status) {
+            status->tls_error = true;
+            status->curl_code = CURLE_SSL_CONNECT_ERROR;
+        }
         curl_slist_free_all(header_list);
         curl_easy_cleanup(curl);
         growbuf_free(&buf);
@@ -204,6 +254,14 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
 
     CURLcode res = curl_easy_perform(curl);
     bool success = (res == CURLE_OK);
+    if (status) {
+        status->curl_code = res;
+        if (success) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status->http_status);
+        } else {
+            status->tls_error = curl_is_tls_error(res);
+        }
+    }
 
     if (success) {
         if (growbuf_append(&buf, "", 1, max_response_bytes + 1)) {
@@ -235,9 +293,11 @@ static size_t stream_write_cb(void* ptr, size_t size, size_t nmemb, void* userda
 
 bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
                       const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data) {
+                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
+                      llm_transport_status_t* status) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
+    transport_status_init(status);
 
     struct curl_slist* header_list = NULL;
     header_list = curl_slist_append(header_list, "Content-Type: application/json");
@@ -251,6 +311,10 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     if (!apply_tls_config(curl, tls, key_pass_buf, sizeof(key_pass_buf))) {
+        if (status) {
+            status->tls_error = true;
+            status->curl_code = CURLE_SSL_CONNECT_ERROR;
+        }
         curl_slist_free_all(header_list);
         curl_easy_cleanup(curl);
         memset(key_pass_buf, 0, sizeof(key_pass_buf));
@@ -274,6 +338,14 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
 
     CURLcode res = curl_easy_perform(curl);
     bool success = (res == CURLE_OK);
+    if (status) {
+        status->curl_code = res;
+        if (success) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status->http_status);
+        } else {
+            status->tls_error = curl_is_tls_error(res);
+        }
+    }
 
     curl_slist_free_all(header_list);
     curl_easy_cleanup(curl);

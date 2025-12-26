@@ -14,6 +14,11 @@ Ownership and lifetime (http_get/http_post):
 - The buffer is not required to be NUL-terminated; if a terminator is added, it is not counted in *len.
 - On failure, the transport sets *body = NULL, *len = 0, and frees any internal buffers.
 
+Status reporting:
+- status->http_status is set to the HTTP response code on success (0 if unknown).
+- status->tls_error is true when a TLS or certificate failure is detected.
+- status->curl_code records the underlying transport error code when available.
+
 Headers:
 - headers and headers[i] are read-only.
 - The transport may read headers during the call, including while invoking streaming callbacks.

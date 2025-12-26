@@ -80,7 +80,7 @@ int parse_completions_response(const char* json, size_t len, llm_completions_res
 
     if (count == 0 || tokens[0].type != JSTOK_OBJECT) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     memset(result, 0, sizeof(*result));
@@ -88,7 +88,7 @@ int parse_completions_response(const char* json, size_t len, llm_completions_res
     int choices_idx = obj_get_key(tokens, count, 0, json, "choices");
     if (choices_idx < 0 || tokens[choices_idx].type != JSTOK_ARRAY || tokens[choices_idx].size <= 0) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     size_t choices_count = (size_t)tokens[choices_idx].size;
@@ -106,7 +106,7 @@ int parse_completions_response(const char* json, size_t len, llm_completions_res
             result->choices = NULL;
             result->choices_count = 0;
             free_tokens(tokens);
-            return -1;
+            return LLM_PARSE_ERR_PROTOCOL;
         }
         int text_idx = obj_get_key(tokens, count, choice_idx, json, "text");
         if (text_idx < 0 || tokens[text_idx].type != JSTOK_STRING) {
@@ -114,7 +114,7 @@ int parse_completions_response(const char* json, size_t len, llm_completions_res
             result->choices = NULL;
             result->choices_count = 0;
             free_tokens(tokens);
-            return -1;
+            return LLM_PARSE_ERR_PROTOCOL;
         }
         span_t sp = tok_span(json, &tokens[text_idx]);
         result->choices[i].text = sp.ptr;
@@ -175,7 +175,7 @@ int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_i
 
     if (count == 0 || tokens[0].type != JSTOK_OBJECT) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     usage_parse(json, tokens, count, usage, usage_present);

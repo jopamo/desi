@@ -30,7 +30,7 @@ static void fake_reset(void) { memset(&g_fake, 0, sizeof(g_fake)); }
 
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
               size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len) {
+              char** body, size_t* len, llm_transport_status_t* status) {
     (void)url;
     (void)timeout_ms;
     (void)max_response_bytes;
@@ -39,6 +39,11 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
     (void)tls;
     (void)proxy_url;
     (void)no_proxy;
+    if (status) {
+        status->http_status = 0;
+        status->curl_code = 0;
+        status->tls_error = false;
+    }
     if (body) *body = NULL;
     if (len) *len = 0;
     return false;
@@ -46,7 +51,7 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 
 bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
                const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len) {
+               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
     (void)url;
     (void)json_body;
     (void)timeout_ms;
@@ -56,15 +61,22 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
     (void)tls;
     (void)proxy_url;
     (void)no_proxy;
+    if (status) {
+        status->http_status = 200;
+        status->curl_code = 0;
+        status->tls_error = false;
+    }
     if (g_fake.post_calls >= (sizeof(g_fake.post_responses) / sizeof(g_fake.post_responses[0]))) {
         if (body) *body = NULL;
         if (len) *len = 0;
+        if (status) status->http_status = 0;
         return false;
     }
     const char* resp = g_fake.post_responses[g_fake.post_calls++];
     if (!resp) {
         if (body) *body = NULL;
         if (len) *len = 0;
+        if (status) status->http_status = 0;
         return false;
     }
     size_t resp_len = strlen(resp);
@@ -79,7 +91,8 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
 
 bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
                       const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data) {
+                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
+                      llm_transport_status_t* status) {
     (void)url;
     (void)json_body;
     (void)timeout_ms;
@@ -89,6 +102,11 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
     (void)tls;
     (void)proxy_url;
     (void)no_proxy;
+    if (status) {
+        status->http_status = 200;
+        status->curl_code = 0;
+        status->tls_error = false;
+    }
     if (!g_fake.stream_payload || g_fake.stream_payload_len == 0) return true;
     size_t chunk_size = g_fake.stream_chunk_size ? g_fake.stream_chunk_size : g_fake.stream_payload_len;
     size_t offset = 0;

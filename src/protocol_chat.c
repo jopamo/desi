@@ -89,7 +89,7 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
 
     if (count == 0 || tokens[0].type != JSTOK_OBJECT) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     memset(result, 0, sizeof(*result));
@@ -97,7 +97,7 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
     int choices_idx = obj_get_key(tokens, count, 0, json, "choices");
     if (choices_idx < 0 || tokens[choices_idx].type != JSTOK_ARRAY || tokens[choices_idx].size <= 0) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     size_t choices_count = (size_t)tokens[choices_idx].size;
@@ -115,7 +115,7 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
             result->choices = NULL;
             result->choices_count = 0;
             free_tokens(tokens);
-            return -1;
+            return LLM_PARSE_ERR_PROTOCOL;
         }
 
         llm_chat_choice_t* choice = &result->choices[i];
@@ -133,7 +133,7 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
             result->choices = NULL;
             result->choices_count = 0;
             free_tokens(tokens);
-            return -1;
+            return LLM_PARSE_ERR_PROTOCOL;
         }
 
         int content_idx = obj_get_key(tokens, count, message_idx, json, "content");
@@ -171,7 +171,7 @@ int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result)
                         result->choices = NULL;
                         result->choices_count = 0;
                         free_tokens(tokens);
-                        return -1;
+                        return LLM_PARSE_ERR_PROTOCOL;
                     }
                     llm_tool_call_t* tc = &choice->tool_calls[j];
                     memset(tc, 0, sizeof(*tc));
@@ -260,7 +260,7 @@ int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, l
 
     if (count == 0 || tokens[0].type != JSTOK_OBJECT) {
         free_tokens(tokens);
-        return -1;
+        return LLM_PARSE_ERR_PROTOCOL;
     }
 
     memset(delta, 0, sizeof(*delta));
@@ -309,7 +309,7 @@ int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, l
                         delta->tool_call_deltas = NULL;
                         delta->tool_call_deltas_count = 0;
                         free_tokens(tokens);
-                        return -1;
+                        return LLM_PARSE_ERR_PROTOCOL;
                     }
                     llm_tool_call_delta_t* td = &delta->tool_call_deltas[i];
                     int index_idx = obj_get_key(tokens, count, tool_idx, json, "index");

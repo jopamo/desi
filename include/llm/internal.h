@@ -12,6 +12,8 @@ typedef struct {
     size_t len;
 } span_t;
 
+#define LLM_PARSE_ERR_PROTOCOL (-100)
+
 static inline span_t span_from_cstr(const char* cstr) {
     span_t sp = {cstr, cstr ? strlen(cstr) : 0};
     return sp;

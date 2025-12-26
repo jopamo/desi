@@ -31,7 +31,8 @@ int main(void) {
 
     char* body = NULL;
     size_t len = 0;
-    if (!http_get(url, 1000, 1024, NULL, 0, NULL, NULL, NULL, &body, &len)) {
+    llm_transport_status_t status;
+    if (!http_get(url, 1000, 1024, NULL, 0, NULL, NULL, NULL, &body, &len, &status)) {
         fprintf(stderr, "http_get failed\n");
         return 1;
     }
@@ -48,7 +49,7 @@ int main(void) {
     free(body);
     body = NULL;
     len = 0;
-    if (http_get(url, 1000, 5, NULL, 0, NULL, NULL, NULL, &body, &len)) {
+    if (http_get(url, 1000, 5, NULL, 0, NULL, NULL, NULL, &body, &len, &status)) {
         fprintf(stderr, "http_get should have failed due to max_response_bytes\n");
         free(body);
         remove(test_filename);
