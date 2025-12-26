@@ -101,6 +101,15 @@ if get_option('tests')
   )
   test('tool_calls_build', test_tool_calls_build)
 
+  test_tool_message_helpers = executable('test_tool_message_helpers',
+    'tests/test_tool_message_helpers.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('tool_message_helpers', test_tool_message_helpers)
+
   test_tools_accum = executable('test_tools_accum',
     'tests/test_tools_accum.c',
     include_directories: [inc, include_directories('src')],

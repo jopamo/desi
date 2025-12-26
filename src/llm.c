@@ -925,6 +925,26 @@ bool llm_completions_choice_get(const llm_completions_result_t* result, size_t i
     return true;
 }
 
+bool llm_tool_message_init(llm_message_t* msg, const char* content, size_t content_len, const char* tool_call_id,
+                           size_t tool_call_id_len, const char* tool_name, size_t tool_name_len) {
+    if (!msg) return false;
+    if (!tool_call_id || tool_call_id_len == 0) return false;
+    if (!content && content_len != 0) return false;
+    if (!tool_name && tool_name_len != 0) return false;
+    if (tool_name && tool_name_len == 0) return false;
+
+    msg->role = LLM_ROLE_TOOL;
+    msg->content = content;
+    msg->content_len = content_len;
+    msg->tool_call_id = tool_call_id;
+    msg->tool_call_id_len = tool_call_id_len;
+    msg->name = tool_name;
+    msg->name_len = tool_name_len;
+    msg->tool_calls_json = NULL;
+    msg->tool_calls_json_len = 0;
+    return true;
+}
+
 static void llm_message_free_content(llm_message_t* msg) {
     if (msg) {
         free((char*)msg->content);

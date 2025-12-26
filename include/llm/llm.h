@@ -93,6 +93,10 @@ typedef struct {
     size_t tool_calls_json_len;
 } llm_message_t;
 
+// Helper for tool-result messages; caller owns all spans (no allocation).
+bool llm_tool_message_init(llm_message_t* msg, const char* content, size_t content_len, const char* tool_call_id,
+                           size_t tool_call_id_len, const char* tool_name, size_t tool_name_len);
+
 // Tool call (span-based)
 typedef struct {
     const char* id;

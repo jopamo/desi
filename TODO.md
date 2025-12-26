@@ -107,7 +107,7 @@ Remaining work is about:
   * No inference
     No silent defaults beyond documented base defaults
 
-* [ ] **Tool response helpers**
+* [x] **Tool response helpers**
 
   * Provide helpers to construct tool-result messages:
 
