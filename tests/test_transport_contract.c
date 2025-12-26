@@ -70,7 +70,8 @@ static bool check_proxy(const char* proxy_url, const char* no_proxy) {
     return true;
 }
 
-static bool extract_choice_content(const char* json, size_t len, const char* obj_key, span_t* out) {
+static bool extract_choice_content_at(const char* json, size_t len, size_t choice_index, const char* obj_key,
+                                      span_t* out) {
     bool ok = false;
     jstok_parser parser;
     jstok_init(&parser);
@@ -84,13 +85,45 @@ static bool extract_choice_content(const char* json, size_t len, const char* obj
     if (tokens[0].type != JSTOK_OBJECT) goto cleanup;
     int choices_idx = obj_get_key(tokens, parsed, 0, json, "choices");
     if (choices_idx < 0 || tokens[choices_idx].type != JSTOK_ARRAY || tokens[choices_idx].size <= 0) goto cleanup;
-    int choice_idx = arr_get(tokens, parsed, choices_idx, 0);
+    if (choice_index >= (size_t)tokens[choices_idx].size) goto cleanup;
+    int choice_idx = arr_get(tokens, parsed, choices_idx, (int)choice_index);
     if (choice_idx < 0 || tokens[choice_idx].type != JSTOK_OBJECT) goto cleanup;
     int obj_idx = obj_get_key(tokens, parsed, choice_idx, json, obj_key);
     if (obj_idx < 0 || tokens[obj_idx].type != JSTOK_OBJECT) goto cleanup;
     int content_idx = obj_get_key(tokens, parsed, obj_idx, json, "content");
     if (content_idx < 0 || tokens[content_idx].type != JSTOK_STRING) goto cleanup;
     *out = tok_span(json, &tokens[content_idx]);
+    ok = true;
+
+cleanup:
+    free(tokens);
+    return ok;
+}
+
+static bool extract_choice_content(const char* json, size_t len, const char* obj_key, span_t* out) {
+    return extract_choice_content_at(json, len, 0, obj_key, out);
+}
+
+static bool extract_completion_text_at(const char* json, size_t len, size_t choice_index, span_t* out) {
+    bool ok = false;
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    if (parsed <= 0) goto cleanup;
+    if (tokens[0].type != JSTOK_OBJECT) goto cleanup;
+    int choices_idx = obj_get_key(tokens, parsed, 0, json, "choices");
+    if (choices_idx < 0 || tokens[choices_idx].type != JSTOK_ARRAY || tokens[choices_idx].size <= 0) goto cleanup;
+    if (choice_index >= (size_t)tokens[choices_idx].size) goto cleanup;
+    int choice_idx = arr_get(tokens, parsed, choices_idx, (int)choice_index);
+    if (choice_idx < 0 || tokens[choice_idx].type != JSTOK_OBJECT) goto cleanup;
+    int text_idx = obj_get_key(tokens, parsed, choice_idx, json, "text");
+    if (text_idx < 0 || tokens[text_idx].type != JSTOK_STRING) goto cleanup;
+    *out = tok_span(json, &tokens[text_idx]);
     ok = true;
 
 cleanup:
@@ -274,6 +307,99 @@ static bool test_contract_body_ownership(void) {
     return true;
 }
 
+static bool test_contract_chat_multi_choice_order(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/chat/completions";
+    g_fake.response_post =
+        "{\"choices\":[{\"message\":{\"content\":\"first\"},\"finish_reason\":\"stop\"},"
+        "{\"message\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    llm_message_t msg = {0};
+    msg.role = LLM_ROLE_USER;
+    msg.content = "hi";
+    msg.content_len = 2;
+
+    llm_chat_result_t result;
+    bool ok = llm_chat(client, &msg, 1, NULL, NULL, NULL, &result);
+    if (!require(ok, "llm_chat failed")) return false;
+    if (!require(result.choices_count == 2, "expected 2 chat choices")) return false;
+
+    span_t expected0 = {0};
+    span_t expected1 = {0};
+    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 0, "message", &expected0),
+                 "choice 0 parse failed"))
+        return false;
+    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 1, "message", &expected1),
+                 "choice 1 parse failed"))
+        return false;
+    if (!require(result.choices[0].content_len == expected0.len, "choice 0 length mismatch")) return false;
+    if (!require(memcmp(result.choices[0].content, expected0.ptr, expected0.len) == 0, "choice 0 mismatch"))
+        return false;
+    if (!require(result.choices[1].content_len == expected1.len, "choice 1 length mismatch")) return false;
+    if (!require(memcmp(result.choices[1].content, expected1.ptr, expected1.len) == 0, "choice 1 mismatch"))
+        return false;
+    if (!require(result.content_len == expected0.len, "alias length mismatch")) return false;
+    if (!require(memcmp(result.content, expected0.ptr, expected0.len) == 0, "alias mismatch")) return false;
+
+    const llm_chat_choice_t* choice = NULL;
+    if (!require(llm_chat_choice_get(&result, 1, &choice), "choice index 1 lookup failed")) return false;
+    if (!require(choice == &result.choices[1], "choice pointer mismatch")) return false;
+    choice = (const llm_chat_choice_t*)0x1;
+    if (!require(!llm_chat_choice_get(&result, 2, &choice), "missing choice should fail")) return false;
+    if (!require(choice == NULL, "missing choice should clear output")) return false;
+
+    llm_chat_result_free(&result);
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during chat choices")) return false;
+    return true;
+}
+
+static bool test_contract_completions_multi_choice_order(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/completions";
+    g_fake.response_post = "{\"choices\":[{\"text\":\"alpha\"},{\"text\":\"beta\"}]}";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    const char* prompt = "hi";
+    llm_completions_result_t res = {0};
+    bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &res);
+    if (!require(ok, "llm_completions failed")) return false;
+    if (!require(res._internal == g_fake.last_body, "response buffer not transferred")) return false;
+    if (!require(res.choices_count == 2, "expected 2 completion choices")) return false;
+
+    span_t expected0 = {0};
+    span_t expected1 = {0};
+    if (!require(extract_completion_text_at(g_fake.last_body, g_fake.last_body_len, 0, &expected0),
+                 "completion 0 parse failed"))
+        return false;
+    if (!require(extract_completion_text_at(g_fake.last_body, g_fake.last_body_len, 1, &expected1),
+                 "completion 1 parse failed"))
+        return false;
+    if (!require(res.choices[0].text_len == expected0.len, "completion 0 length mismatch")) return false;
+    if (!require(memcmp(res.choices[0].text, expected0.ptr, expected0.len) == 0, "completion 0 mismatch")) return false;
+    if (!require(res.choices[1].text_len == expected1.len, "completion 1 length mismatch")) return false;
+    if (!require(memcmp(res.choices[1].text, expected1.ptr, expected1.len) == 0, "completion 1 mismatch")) return false;
+
+    const llm_completion_choice_t* choice = NULL;
+    if (!require(llm_completions_choice_get(&res, 1, &choice), "completion index 1 lookup failed")) return false;
+    if (!require(choice == &res.choices[1], "completion pointer mismatch")) return false;
+    choice = (const llm_completion_choice_t*)0x1;
+    if (!require(!llm_completions_choice_get(&res, 2, &choice), "missing completion should fail")) return false;
+    if (!require(choice == NULL, "missing completion should clear output")) return false;
+
+    llm_completions_free(&res);
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during completions choices")) return false;
+    return true;
+}
+
 static bool test_contract_streaming_headers(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -329,6 +455,57 @@ static bool test_contract_streaming_headers(void) {
     return true;
 }
 
+static bool test_contract_chat_stream_choice_index(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/chat/completions";
+
+    static const char stream_json[] =
+        "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"zero\"},\"finish_reason\":null},"
+        "{\"index\":1,\"delta\":{\"content\":\"one\"},\"finish_reason\":\"stop\"}]}";
+    static const char stream_sse[] =
+        "data: "
+        "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"zero\"},\"finish_reason\":null},"
+        "{\"index\":1,\"delta\":{\"content\":\"one\"},\"finish_reason\":\"stop\"}]}"
+        "\n\n"
+        "data: [DONE]\n\n";
+    g_fake.stream_payload = stream_sse;
+    g_fake.stream_payload_len = strlen(stream_sse);
+    g_fake.stream_chunk_size = 32;
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    llm_message_t msg = {0};
+    msg.role = LLM_ROLE_USER;
+    msg.content = "ping";
+    msg.content_len = 4;
+
+    struct stream_capture cap = {0};
+    cap.finish_reason = LLM_FINISH_REASON_UNKNOWN;
+
+    llm_stream_callbacks_t callbacks = {0};
+    callbacks.user_data = &cap;
+    callbacks.on_content_delta = on_content_delta;
+    callbacks.on_finish_reason = on_finish_reason;
+
+    bool ok = llm_chat_stream_choice(client, &msg, 1, NULL, NULL, NULL, 1, &callbacks);
+    if (!require(ok, "llm_chat_stream_choice failed")) return false;
+    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
+
+    span_t expected = {0};
+    if (!require(extract_choice_content_at(stream_json, strlen(stream_json), 1, "delta", &expected),
+                 "stream choice parse failed"))
+        return false;
+    if (!require(cap.len == expected.len, "stream content length mismatch")) return false;
+    if (!require(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream content mismatch")) return false;
+
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during chat stream choice")) return false;
+    return true;
+}
+
 static bool test_contract_completions_streaming_headers(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -370,6 +547,53 @@ static bool test_contract_completions_streaming_headers(void) {
     if (!require(memcmp(cap.content, "hi!", 3) == 0, "stream content mismatch")) return false;
 
     llm_client_destroy(client);
+    return true;
+}
+
+static bool test_contract_completions_stream_choice_index(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/completions";
+
+    static const char stream_json[] =
+        "{\"choices\":[{\"index\":0,\"text\":\"zero\",\"finish_reason\":null},"
+        "{\"index\":1,\"text\":\"one\",\"finish_reason\":\"stop\"}]}";
+    static const char stream_sse[] =
+        "data: "
+        "{\"choices\":[{\"index\":0,\"text\":\"zero\",\"finish_reason\":null},"
+        "{\"index\":1,\"text\":\"one\",\"finish_reason\":\"stop\"}]}"
+        "\n\n"
+        "data: [DONE]\n\n";
+    g_fake.stream_payload = stream_sse;
+    g_fake.stream_payload_len = strlen(stream_sse);
+    g_fake.stream_chunk_size = 32;
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    struct stream_capture cap = {0};
+    cap.finish_reason = LLM_FINISH_REASON_UNKNOWN;
+
+    llm_stream_callbacks_t callbacks = {0};
+    callbacks.user_data = &cap;
+    callbacks.on_content_delta = on_content_delta;
+    callbacks.on_finish_reason = on_finish_reason;
+
+    const char* prompt = "ping";
+    bool ok = llm_completions_stream_choice(client, prompt, strlen(prompt), NULL, 1, &callbacks);
+    if (!require(ok, "llm_completions_stream_choice failed")) return false;
+    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
+
+    span_t expected = {0};
+    if (!require(extract_completion_text_at(stream_json, strlen(stream_json), 1, &expected),
+                 "completion choice parse failed"))
+        return false;
+    if (!require(cap.len == expected.len, "stream content length mismatch")) return false;
+    if (!require(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream content mismatch")) return false;
+
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during completions stream choice")) return false;
     return true;
 }
 
@@ -466,12 +690,12 @@ static bool test_contract_completions_missing_choices(void) {
     if (!require(client, "client create failed")) return false;
 
     const char* prompt = "hi";
-    const char** texts = NULL;
-    size_t count = 0;
-    bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &texts, &count);
+    llm_completions_result_t res = {0};
+    bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &res);
     if (!require(!ok, "llm_completions should fail on missing choices")) return false;
-    if (!require(texts == NULL, "texts should be NULL on failure")) return false;
-    if (!require(count == 0, "count should be 0 on failure")) return false;
+    if (!require(res.choices == NULL, "choices should be NULL on failure")) return false;
+    if (!require(res.choices_count == 0, "choices_count should be 0 on failure")) return false;
+    if (!require(res._internal == NULL, "response buffer should be NULL on failure")) return false;
 
     llm_client_destroy(client);
     if (!require(g_fake.headers_ok, "headers unstable during completions")) return false;
@@ -483,8 +707,12 @@ int main(void) {
     if (!test_contract_api_key_injection_rejected()) return 1;
     if (!test_contract_completions_missing_choices()) return 1;
     if (!test_contract_body_ownership()) return 1;
+    if (!test_contract_chat_multi_choice_order()) return 1;
+    if (!test_contract_completions_multi_choice_order()) return 1;
     if (!test_contract_streaming_headers()) return 1;
+    if (!test_contract_chat_stream_choice_index()) return 1;
     if (!test_contract_completions_streaming_headers()) return 1;
+    if (!test_contract_completions_stream_choice_index()) return 1;
     if (!test_contract_proxy_passthrough()) return 1;
     if (!test_contract_failure_propagation()) return 1;
     printf("Transport contract tests passed.\n");

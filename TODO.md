@@ -99,7 +99,7 @@ The library is functional end-to-end, but the remaining work is about:
     - usage and model fields behave consistently
     - cancellation and limits apply identically
 
-- [ ] **Multiple choices**
+- [x] **Multiple choices**
   - Define explicit API behavior for `n > 1`
   - Non-stream:
     - expose `choices[]` spans without allocation

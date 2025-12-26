@@ -551,12 +551,14 @@ bool llm_props_get(llm_client_t* client, const char** json, size_t* len) {
 // Forward declarations from other modules
 int parse_chat_response(const char* json, size_t len, llm_chat_result_t* result);
 int parse_chat_chunk(const char* json, size_t len, llm_chat_chunk_delta_t* delta);
-int parse_completions_response(const char* json, size_t len, const char*** texts, size_t* count);
+int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, llm_chat_chunk_delta_t* delta);
+int parse_completions_response(const char* json, size_t len, llm_completions_result_t* result);
 int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason);
+int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_index, span_t* text_delta,
+                                   llm_finish_reason_t* finish_reason);
 
 bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
-                                  const char*** texts, size_t* count, const char* const* headers,
-                                  size_t headers_count) {
+                                  llm_completions_result_t* result, const char* const* headers, size_t headers_count) {
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
@@ -579,40 +581,41 @@ bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size
     free(request_json);
 
     if (ok) {
-        int res = parse_completions_response(response_body, response_len, texts, count);
+        memset(result, 0, sizeof(*result));
+        int res = parse_completions_response(response_body, response_len, result);
         if (res < 0) {
             free(response_body);
             ok = false;
         } else {
-            free(response_body);  // parse_completions_response now makes copies
+            result->_internal = response_body;
         }
     }
     return ok;
 }
 
 bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
-                     const char*** texts, size_t* count) {
-    return llm_completions_with_headers(client, prompt, prompt_len, params_json, texts, count, NULL, 0);
+                     llm_completions_result_t* result) {
+    return llm_completions_with_headers(client, prompt, prompt_len, params_json, result, NULL, 0);
 }
 
-void llm_completions_free(const char** texts, size_t count) {
-    if (texts) {
-        for (size_t i = 0; i < count; i++) {
-            free((char*)texts[i]);
-        }
-        free(texts);
+void llm_completions_free(llm_completions_result_t* result) {
+    if (result) {
+        free(result->choices);
+        free(result->_internal);
+        memset(result, 0, sizeof(*result));
     }
 }
 
 struct completions_stream_ctx {
     const llm_stream_callbacks_t* callbacks;
+    size_t choice_index;
 };
 
 static void on_sse_completions_data(void* user_data, span_t line) {
     struct completions_stream_ctx* ctx = user_data;
     span_t text_delta = {0};
     llm_finish_reason_t finish_reason = LLM_FINISH_REASON_UNKNOWN;
-    if (parse_completions_chunk(line.ptr, line.len, &text_delta, &finish_reason) == 0) {
+    if (parse_completions_chunk_choice(line.ptr, line.len, ctx->choice_index, &text_delta, &finish_reason) == 0) {
         if (text_delta.ptr && ctx->callbacks->on_content_delta) {
             ctx->callbacks->on_content_delta(ctx->callbacks->user_data, text_delta.ptr, text_delta.len);
         }
@@ -631,16 +634,17 @@ static void sse_stream_cb(const char* chunk, size_t len, void* user_data) {
     sse_feed(cs->sse, chunk, len);
 }
 
-bool llm_completions_stream_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
-                                         const char* params_json, const llm_stream_callbacks_t* callbacks,
-                                         const char* const* headers, size_t headers_count) {
+static bool llm_completions_stream_with_headers_choice(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                       const char* params_json, size_t choice_index,
+                                                       const llm_stream_callbacks_t* callbacks,
+                                                       const char* const* headers, size_t headers_count) {
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/completions", client->base_url);
 
     char* request_json = build_completions_request(client->model.name, prompt, prompt_len, true, params_json);
     if (!request_json) return false;
 
-    struct completions_stream_ctx ctx = {callbacks};
+    struct completions_stream_ctx ctx = {callbacks, choice_index};
     sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_response_bytes);
     sse_set_callback(sse, on_sse_completions_data, &ctx);
 
@@ -663,9 +667,30 @@ bool llm_completions_stream_with_headers(llm_client_t* client, const char* promp
     return ok;
 }
 
+bool llm_completions_stream_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                         const char* params_json, const llm_stream_callbacks_t* callbacks,
+                                         const char* const* headers, size_t headers_count) {
+    return llm_completions_stream_with_headers_choice(client, prompt, prompt_len, params_json, 0, callbacks, headers,
+                                                      headers_count);
+}
+
 bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
                             const llm_stream_callbacks_t* callbacks) {
     return llm_completions_stream_with_headers(client, prompt, prompt_len, params_json, callbacks, NULL, 0);
+}
+
+bool llm_completions_stream_choice(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                                   size_t choice_index, const llm_stream_callbacks_t* callbacks) {
+    return llm_completions_stream_with_headers_choice(client, prompt, prompt_len, params_json, choice_index, callbacks,
+                                                      NULL, 0);
+}
+
+bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                const char* params_json, size_t choice_index,
+                                                const llm_stream_callbacks_t* callbacks, const char* const* headers,
+                                                size_t headers_count) {
+    return llm_completions_stream_with_headers_choice(client, prompt, prompt_len, params_json, choice_index, callbacks,
+                                                      headers, headers_count);
 }
 
 bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -715,10 +740,32 @@ bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messag
 
 void llm_chat_result_free(llm_chat_result_t* result) {
     if (result) {
-        free(result->tool_calls);
+        if (result->choices) {
+            for (size_t i = 0; i < result->choices_count; i++) {
+                free(result->choices[i].tool_calls);
+            }
+            free(result->choices);
+        }
         free(result->_internal);
         memset(result, 0, sizeof(*result));
     }
+}
+
+bool llm_chat_choice_get(const llm_chat_result_t* result, size_t index, const llm_chat_choice_t** out_choice) {
+    if (!out_choice) return false;
+    *out_choice = NULL;
+    if (!result || !result->choices || index >= result->choices_count) return false;
+    *out_choice = &result->choices[index];
+    return true;
+}
+
+bool llm_completions_choice_get(const llm_completions_result_t* result, size_t index,
+                                const llm_completion_choice_t** out_choice) {
+    if (!out_choice) return false;
+    *out_choice = NULL;
+    if (!result || !result->choices || index >= result->choices_count) return false;
+    *out_choice = &result->choices[index];
+    return true;
 }
 
 static void llm_message_free_content(llm_message_t* msg) {
@@ -731,6 +778,7 @@ static void llm_message_free_content(llm_message_t* msg) {
 
 struct stream_ctx {
     const llm_stream_callbacks_t* callbacks;
+    size_t choice_index;
     struct tool_call_accumulator* accums;
     size_t accums_count;
     size_t max_tool_args;
@@ -739,7 +787,7 @@ struct stream_ctx {
 static void on_sse_data(void* user_data, span_t line) {
     struct stream_ctx* ctx = user_data;
     llm_chat_chunk_delta_t delta;
-    if (parse_chat_chunk(line.ptr, line.len, &delta) == 0) {
+    if (parse_chat_chunk_choice(line.ptr, line.len, ctx->choice_index, &delta) == 0) {
         if (delta.content_delta && ctx->callbacks->on_content_delta) {
             ctx->callbacks->on_content_delta(ctx->callbacks->user_data, delta.content_delta, delta.content_delta_len);
         }
@@ -782,10 +830,11 @@ static void curl_stream_cb(const char* chunk, size_t len, void* user_data) {
     sse_feed(cs->sse, chunk, len);
 }
 
-bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
-                                  const char* params_json, const char* tooling_json, const char* response_format_json,
-                                  const llm_stream_callbacks_t* callbacks, const char* const* headers,
-                                  size_t headers_count) {
+static bool llm_chat_stream_with_headers_choice(llm_client_t* client, const llm_message_t* messages,
+                                                size_t messages_count, const char* params_json,
+                                                const char* tooling_json, const char* response_format_json,
+                                                size_t choice_index, const llm_stream_callbacks_t* callbacks,
+                                                const char* const* headers, size_t headers_count) {
     char url[1024];
     snprintf(url, sizeof(url), "%s/v1/chat/completions", client->base_url);
 
@@ -793,7 +842,11 @@ bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* mes
                                             tooling_json, response_format_json);
     if (!request_json) return false;
 
-    struct stream_ctx ctx = {callbacks, NULL, 0, client->limits.max_tool_args_bytes_per_call};
+    struct stream_ctx ctx = {.callbacks = callbacks,
+                             .choice_index = choice_index,
+                             .accums = NULL,
+                             .accums_count = 0,
+                             .max_tool_args = client->limits.max_tool_args_bytes_per_call};
     sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_response_bytes);
     sse_set_callback(sse, on_sse_data, &ctx);
 
@@ -821,11 +874,35 @@ bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* mes
     return ok;
 }
 
+bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                  const char* params_json, const char* tooling_json, const char* response_format_json,
+                                  const llm_stream_callbacks_t* callbacks, const char* const* headers,
+                                  size_t headers_count) {
+    return llm_chat_stream_with_headers_choice(client, messages, messages_count, params_json, tooling_json,
+                                               response_format_json, 0, callbacks, headers, headers_count);
+}
+
 bool llm_chat_stream(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
                      const char* params_json, const char* tooling_json, const char* response_format_json,
                      const llm_stream_callbacks_t* callbacks) {
     return llm_chat_stream_with_headers(client, messages, messages_count, params_json, tooling_json,
                                         response_format_json, callbacks, NULL, 0);
+}
+
+bool llm_chat_stream_choice(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                            const char* params_json, const char* tooling_json, const char* response_format_json,
+                            size_t choice_index, const llm_stream_callbacks_t* callbacks) {
+    return llm_chat_stream_with_headers_choice(client, messages, messages_count, params_json, tooling_json,
+                                               response_format_json, choice_index, callbacks, NULL, 0);
+}
+
+bool llm_chat_stream_choice_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                         const char* params_json, const char* tooling_json,
+                                         const char* response_format_json, size_t choice_index,
+                                         const llm_stream_callbacks_t* callbacks, const char* const* headers,
+                                         size_t headers_count) {
+    return llm_chat_stream_with_headers_choice(client, messages, messages_count, params_json, tooling_json,
+                                               response_format_json, choice_index, callbacks, headers, headers_count);
 }
 
 // Tool loop implementation is usually complex, let's put a simplified version here

@@ -85,15 +85,14 @@ static void test_completions_basic(llm_client_t* client) {
     const char* prompt = "one\ntwo\n";
     const char* params = "{\"max_tokens\": 32, \"temperature\": 0, \"stop\": [\"\\n\"]}";
 
-    const char** texts = NULL;
-    size_t count = 0;
+    llm_completions_result_t res = {0};
 
-    if (llm_completions(client, prompt, strlen(prompt), params, &texts, &count)) {
-        LOG("Completions received: %zu", count);
-        for (size_t i = 0; i < count; i++) {
-            LOG("Choice %zu: '%s'", i, texts[i]);
+    if (llm_completions(client, prompt, strlen(prompt), params, &res)) {
+        LOG("Completions received: %zu", res.choices_count);
+        for (size_t i = 0; i < res.choices_count; i++) {
+            LOG("Choice %zu: '%.*s'", i, (int)res.choices[i].text_len, res.choices[i].text);
         }
-        llm_completions_free(texts, count);
+        llm_completions_free(&res);
     } else {
         ASSERT(false, "Completions failed");
     }

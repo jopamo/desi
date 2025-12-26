@@ -90,8 +90,23 @@ typedef struct {
     size_t arguments_len;
 } llm_tool_call_t;
 
+// Chat completion choice (non-stream)
+typedef struct {
+    llm_finish_reason_t finish_reason;
+    const char* content;  // may be NULL
+    size_t content_len;
+    const char* reasoning_content;  // may be NULL
+    size_t reasoning_content_len;
+    llm_tool_call_t* tool_calls;  // array
+    size_t tool_calls_count;
+} llm_chat_choice_t;
+
 // Chat completion result (non-stream)
 typedef struct {
+    llm_chat_choice_t* choices;  // array
+    size_t choices_count;
+
+    // Convenience aliases for choices[0]
     llm_finish_reason_t finish_reason;
     const char* content;  // may be NULL
     size_t content_len;
@@ -167,14 +182,27 @@ bool llm_props_get(llm_client_t* client, const char** json, size_t* len);
 bool llm_props_get_with_headers(llm_client_t* client, const char** json, size_t* len, const char* const* headers,
                                 size_t headers_count);
 
+// Completion choice (span-based)
+typedef struct {
+    const char* text;
+    size_t text_len;
+} llm_completion_choice_t;
+
+// Completions result (non-stream)
+typedef struct {
+    llm_completion_choice_t* choices;  // array
+    size_t choices_count;
+    void* _internal;  // Internal buffer for spans
+} llm_completions_result_t;
+
 // Completions (non-stream)
-// Returns array of text spans
+// Returns text spans into the response buffer
 bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len,
                      const char* params_json,  // optional JSON string
-                     const char*** texts, size_t* count);
+                     llm_completions_result_t* result);
 bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
-                                  const char*** texts, size_t* count, const char* const* headers, size_t headers_count);
-void llm_completions_free(const char** texts, size_t count);
+                                  llm_completions_result_t* result, const char* const* headers, size_t headers_count);
+void llm_completions_free(llm_completions_result_t* result);
 
 // Completions (stream)
 bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
@@ -182,6 +210,12 @@ bool llm_completions_stream(llm_client_t* client, const char* prompt, size_t pro
 bool llm_completions_stream_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
                                          const char* params_json, const llm_stream_callbacks_t* callbacks,
                                          const char* const* headers, size_t headers_count);
+bool llm_completions_stream_choice(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
+                                   size_t choice_index, const llm_stream_callbacks_t* callbacks);
+bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len,
+                                                const char* params_json, size_t choice_index,
+                                                const llm_stream_callbacks_t* callbacks, const char* const* headers,
+                                                size_t headers_count);
 
 // Chat non-stream
 bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -193,6 +227,9 @@ bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, 
                            const char* params_json, const char* tooling_json, const char* response_format_json,
                            llm_chat_result_t* result, const char* const* headers, size_t headers_count);
 void llm_chat_result_free(llm_chat_result_t* result);
+bool llm_chat_choice_get(const llm_chat_result_t* result, size_t index, const llm_chat_choice_t** out_choice);
+bool llm_completions_choice_get(const llm_completions_result_t* result, size_t index,
+                                const llm_completion_choice_t** out_choice);
 
 // Chat stream
 bool llm_chat_stream(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
@@ -202,6 +239,14 @@ bool llm_chat_stream_with_headers(llm_client_t* client, const llm_message_t* mes
                                   const char* params_json, const char* tooling_json, const char* response_format_json,
                                   const llm_stream_callbacks_t* callbacks, const char* const* headers,
                                   size_t headers_count);
+bool llm_chat_stream_choice(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                            const char* params_json, const char* tooling_json, const char* response_format_json,
+                            size_t choice_index, const llm_stream_callbacks_t* callbacks);
+bool llm_chat_stream_choice_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
+                                         const char* params_json, const char* tooling_json,
+                                         const char* response_format_json, size_t choice_index,
+                                         const llm_stream_callbacks_t* callbacks, const char* const* headers,
+                                         size_t headers_count);
 
 // Tool loop runner
 typedef bool (*llm_tool_dispatch_cb)(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
