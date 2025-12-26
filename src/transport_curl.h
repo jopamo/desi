@@ -6,7 +6,7 @@
 
 typedef struct llm_tls_config llm_tls_config_t;
 
-typedef void (*stream_cb)(const char* chunk, size_t len, void* user_data);
+typedef bool (*stream_cb)(const char* chunk, size_t len, void* user_data);
 
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
               size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,

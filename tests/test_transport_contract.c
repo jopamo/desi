@@ -330,10 +330,11 @@ bool http_post_stream(const char* url, const char* json_body, long timeout_ms, l
         size_t take = remaining < chunk_size ? remaining : chunk_size;
         memcpy(chunk, g_fake.stream_payload + offset, take);
         g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
-        cb(chunk, take, user_data);
+        bool keep = cb(chunk, take, user_data);
         g_fake.stream_cb_calls++;
         g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
         memset(chunk, 'x', take);
+        if (!keep) return false;
         offset += take;
     }
     return true;
@@ -367,6 +368,8 @@ static llm_client_t* make_client(const char* base_url, const char* const* header
     llm_limits_t limits = {0};
     limits.max_response_bytes = 64 * 1024;
     limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
     limits.max_tool_args_bytes_per_call = 1024;
     if (headers && headers_count > 0) {
         return llm_client_create_with_headers(base_url, &model, &timeout, &limits, headers, headers_count);
@@ -384,9 +387,27 @@ static llm_client_t* make_client_with_embedding_limits(const char* base_url, siz
     llm_limits_t limits = {0};
     limits.max_response_bytes = 64 * 1024;
     limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
     limits.max_tool_args_bytes_per_call = 1024;
     limits.max_embedding_input_bytes = max_input_bytes;
     limits.max_embedding_inputs = max_inputs;
+    return llm_client_create(base_url, &model, &timeout, &limits);
+}
+
+static llm_client_t* make_client_with_stream_limits(const char* base_url, size_t max_line_bytes, size_t max_frame_bytes,
+                                                    size_t max_sse_buffer_bytes) {
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {0};
+    timeout.connect_timeout_ms = 1000;
+    timeout.overall_timeout_ms = 2000;
+    timeout.read_idle_timeout_ms = 2000;
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = max_line_bytes;
+    limits.max_frame_bytes = max_frame_bytes;
+    limits.max_sse_buffer_bytes = max_sse_buffer_bytes;
+    limits.max_tool_args_bytes_per_call = 1024;
     return llm_client_create(base_url, &model, &timeout, &limits);
 }
 
@@ -714,6 +735,39 @@ static bool test_contract_completions_stream_choice_index(void) {
     return true;
 }
 
+static bool test_contract_stream_line_cap_overflow(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/chat/completions";
+
+    static const char stream_sse[] = "data: 123456789";
+    g_fake.stream_payload = stream_sse;
+    g_fake.stream_payload_len = strlen(stream_sse);
+    g_fake.stream_chunk_size = 5;
+
+    llm_client_t* client = make_client_with_stream_limits("http://fake", 8, 0, 64);
+    if (!require(client, "client create failed")) return false;
+
+    llm_message_t msg = {0};
+    msg.role = LLM_ROLE_USER;
+    msg.content = "ping";
+    msg.content_len = 4;
+
+    struct stream_capture cap = {0};
+    llm_stream_callbacks_t callbacks = {0};
+    callbacks.user_data = &cap;
+    callbacks.on_content_delta = on_content_delta;
+
+    bool ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &callbacks);
+    if (!require(!ok, "llm_chat_stream should fail on line cap overflow")) return false;
+    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(cap.len == 0, "content should not be produced on overflow")) return false;
+
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during line cap overflow")) return false;
+    return true;
+}
+
 static bool test_contract_embeddings_request_and_parse(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -933,6 +987,7 @@ int main(void) {
     if (!test_contract_chat_stream_choice_index()) return 1;
     if (!test_contract_completions_streaming_headers()) return 1;
     if (!test_contract_completions_stream_choice_index()) return 1;
+    if (!test_contract_stream_line_cap_overflow()) return 1;
     if (!test_contract_embeddings_request_and_parse()) return 1;
     if (!test_contract_embeddings_limits()) return 1;
     if (!test_contract_proxy_passthrough()) return 1;

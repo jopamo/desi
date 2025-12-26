@@ -65,6 +65,15 @@ if get_option('tests')
   )
   test('transport', test_transport)
 
+  test_sse_limits = executable('test_sse_limits',
+    'tests/test_sse_limits.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('sse_limits', test_sse_limits)
+
   test_tls = executable('test_tls',
     'tests/test_tls.c',
     include_directories: [inc, include_directories('src')],

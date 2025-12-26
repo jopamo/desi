@@ -21,7 +21,9 @@ typedef struct {
 // Limits configuration
 typedef struct {
     size_t max_response_bytes;
-    size_t max_line_bytes;  // for SSE
+    size_t max_line_bytes;        // SSE line cap
+    size_t max_frame_bytes;       // SSE data payload cap
+    size_t max_sse_buffer_bytes;  // SSE buffer cap
     size_t max_tool_args_bytes_per_call;
     size_t max_embedding_input_bytes;
     size_t max_embedding_inputs;

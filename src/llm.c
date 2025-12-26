@@ -107,6 +107,8 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
     } else {
         client->limits.max_response_bytes = 10 * 1024 * 1024;
         client->limits.max_line_bytes = 1024 * 1024;
+        client->limits.max_frame_bytes = 1024 * 1024;
+        client->limits.max_sse_buffer_bytes = 10 * 1024 * 1024;
         client->limits.max_tool_args_bytes_per_call = 1024 * 1024;
         client->limits.max_embedding_input_bytes = 1024 * 1024;
         client->limits.max_embedding_inputs = 1024;
@@ -630,11 +632,17 @@ static void on_sse_completions_data(void* user_data, span_t line) {
 
 struct sse_stream_ctx {
     sse_parser_t* sse;
+    int sse_error;
 };
 
-static void sse_stream_cb(const char* chunk, size_t len, void* user_data) {
+static bool sse_stream_cb(const char* chunk, size_t len, void* user_data) {
     struct sse_stream_ctx* cs = user_data;
-    sse_feed(cs->sse, chunk, len);
+    int rc = sse_feed(cs->sse, chunk, len);
+    if (rc != SSE_OK) {
+        cs->sse_error = rc;
+        return false;
+    }
+    return true;
 }
 
 static bool llm_completions_stream_with_headers_choice(llm_client_t* client, const char* prompt, size_t prompt_len,
@@ -648,10 +656,11 @@ static bool llm_completions_stream_with_headers_choice(llm_client_t* client, con
     if (!request_json) return false;
 
     struct completions_stream_ctx ctx = {callbacks, choice_index};
-    sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_response_bytes);
+    sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_frame_bytes,
+                                   client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     sse_set_callback(sse, on_sse_completions_data, &ctx);
 
-    struct sse_stream_ctx cs = {sse};
+    struct sse_stream_ctx cs = {sse, SSE_OK};
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         sse_destroy(sse);
@@ -663,6 +672,9 @@ static bool llm_completions_stream_with_headers_choice(llm_client_t* client, con
     bool ok = http_post_stream(url, request_json, client->timeout.overall_timeout_ms,
                                client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
                                client->proxy_url, client->no_proxy, sse_stream_cb, &cs);
+    if (cs.sse_error != SSE_OK) {
+        ok = false;
+    }
     header_set_free(&header_set);
     sse_destroy(sse);
     free(request_json);
@@ -878,11 +890,17 @@ static void on_sse_data(void* user_data, span_t line) {
 typedef struct {
     sse_parser_t* sse;
     struct stream_ctx* ctx;
+    int sse_error;
 } curl_stream_ctx;
 
-static void curl_stream_cb(const char* chunk, size_t len, void* user_data) {
+static bool curl_stream_cb(const char* chunk, size_t len, void* user_data) {
     curl_stream_ctx* cs = user_data;
-    sse_feed(cs->sse, chunk, len);
+    int rc = sse_feed(cs->sse, chunk, len);
+    if (rc != SSE_OK) {
+        cs->sse_error = rc;
+        return false;
+    }
+    return true;
 }
 
 static bool llm_chat_stream_with_headers_choice(llm_client_t* client, const llm_message_t* messages,
@@ -902,10 +920,11 @@ static bool llm_chat_stream_with_headers_choice(llm_client_t* client, const llm_
                              .accums = NULL,
                              .accums_count = 0,
                              .max_tool_args = client->limits.max_tool_args_bytes_per_call};
-    sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_response_bytes);
+    sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_frame_bytes,
+                                   client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     sse_set_callback(sse, on_sse_data, &ctx);
 
-    curl_stream_ctx cs = {sse, &ctx};
+    curl_stream_ctx cs = {sse, &ctx, SSE_OK};
     struct header_set header_set;
     if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
         sse_destroy(sse);
@@ -918,6 +937,9 @@ static bool llm_chat_stream_with_headers_choice(llm_client_t* client, const llm_
                                client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
                                client->proxy_url, client->no_proxy, curl_stream_cb, &cs);
     header_set_free(&header_set);
+    if (cs.sse_error != SSE_OK) {
+        ok = false;
+    }
 
     for (size_t i = 0; i < ctx.accums_count; i++) {
         accum_free(&ctx.accums[i]);

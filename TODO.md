@@ -130,7 +130,7 @@ The library is functional end-to-end, but the remaining work is about:
 
 ### Tasks
 
-- [ ] **Strict line and frame caps**
+- [x] **Strict line and frame caps**
   - Enforce:
     - `max_line_bytes`
     - `max_frame_bytes`

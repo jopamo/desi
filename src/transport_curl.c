@@ -229,7 +229,7 @@ static size_t stream_write_cb(void* ptr, size_t size, size_t nmemb, void* userda
         stream_cb cb;
         void* user_data;
     }* ctx = userdata;
-    ctx->cb(ptr, realsize, ctx->user_data);
+    if (!ctx->cb(ptr, realsize, ctx->user_data)) return 0;
     return realsize;
 }
 

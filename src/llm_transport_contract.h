@@ -24,11 +24,12 @@ Streaming (http_post_stream):
 - Callbacks are serialized and non-reentrant.
 - No callbacks occur after http_post_stream returns.
 - The chunk pointer is valid only for the duration of the callback; callers must copy to retain data.
+- stream_cb returns true to continue and false to abort the stream.
 
 Failure propagation:
 - Any transport, TLS, or size-cap error returns false.
 - Streaming must stop on failure and emit no further callbacks.
-- If a backend can detect callback failure, it must propagate that as a false return.
+- Callback failure must be propagated as a false return.
 */
 
 #endif  // LLM_TRANSPORT_CONTRACT_H
