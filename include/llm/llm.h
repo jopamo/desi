@@ -359,19 +359,21 @@ typedef bool (*llm_tool_dispatch_cb)(void* user_data, const char* tool_name, siz
                                      size_t args_len, char** result_json, size_t* result_len);
 
 bool llm_tool_loop_run(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
-                       const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                       size_t max_turns);
+                       const char* params_json, const char* tooling_json, const char* response_format_json,
+                       llm_tool_dispatch_cb dispatch, void* dispatch_user_data, size_t max_turns);
 bool llm_tool_loop_run_with_headers(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
-                                    const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                                    size_t max_turns, const char* const* headers, size_t headers_count);
+                                    const char* params_json, const char* tooling_json, const char* response_format_json,
+                                    llm_tool_dispatch_cb dispatch, void* dispatch_user_data, size_t max_turns,
+                                    const char* const* headers, size_t headers_count);
 llm_error_t llm_tool_loop_run_ex(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
-                                 const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                                 llm_abort_cb abort_cb, void* abort_user_data, size_t max_turns);
+                                 const char* params_json, const char* tooling_json, const char* response_format_json,
+                                 llm_tool_dispatch_cb dispatch, void* dispatch_user_data, llm_abort_cb abort_cb,
+                                 void* abort_user_data, size_t max_turns);
 llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_message_t* initial_messages,
-                                              size_t initial_count, const char* tooling_json,
-                                              llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                                              llm_abort_cb abort_cb, void* abort_user_data, size_t max_turns,
-                                              const char* const* headers, size_t headers_count);
+                                              size_t initial_count, const char* params_json, const char* tooling_json,
+                                              const char* response_format_json, llm_tool_dispatch_cb dispatch,
+                                              void* dispatch_user_data, llm_abort_cb abort_cb, void* abort_user_data,
+                                              size_t max_turns, const char* const* headers, size_t headers_count);
 
 // Utility functions
 llm_finish_reason_t llm_finish_reason_from_string(const char* str, size_t len);

@@ -154,6 +154,42 @@ cleanup:
     return ok;
 }
 
+static bool extract_request_controls(const char* json, size_t len, span_t* temperature, span_t* response_type,
+                                     span_t* tool_choice_name) {
+    bool ok = false;
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    if (parsed <= 0 || tokens[0].type != JSTOK_OBJECT) goto cleanup;
+
+    int temp_idx = obj_get_key(tokens, parsed, 0, json, "temperature");
+    if (temp_idx < 0 || tokens[temp_idx].type != JSTOK_PRIMITIVE) goto cleanup;
+    int resp_idx = obj_get_key(tokens, parsed, 0, json, "response_format");
+    if (resp_idx < 0 || tokens[resp_idx].type != JSTOK_OBJECT) goto cleanup;
+    int type_idx = obj_get_key(tokens, parsed, resp_idx, json, "type");
+    if (type_idx < 0 || tokens[type_idx].type != JSTOK_STRING) goto cleanup;
+    int tool_choice_idx = obj_get_key(tokens, parsed, 0, json, "tool_choice");
+    if (tool_choice_idx < 0 || tokens[tool_choice_idx].type != JSTOK_OBJECT) goto cleanup;
+    int func_idx = obj_get_key(tokens, parsed, tool_choice_idx, json, "function");
+    if (func_idx < 0 || tokens[func_idx].type != JSTOK_OBJECT) goto cleanup;
+    int name_idx = obj_get_key(tokens, parsed, func_idx, json, "name");
+    if (name_idx < 0 || tokens[name_idx].type != JSTOK_STRING) goto cleanup;
+
+    *temperature = tok_span(json, &tokens[temp_idx]);
+    *response_type = tok_span(json, &tokens[type_idx]);
+    *tool_choice_name = tok_span(json, &tokens[name_idx]);
+    ok = true;
+
+cleanup:
+    free(tokens);
+    return ok;
+}
+
 static bool tool_dispatch(void* user_data, const char* tool_name, size_t name_len, const char* args_json,
                           size_t args_len, char** result_json, size_t* result_len) {
     (void)user_data;
@@ -189,7 +225,7 @@ static bool test_tool_loop_includes_tool_calls(void) {
     const char* tooling_json = "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}]}";
     llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
 
-    bool ok = llm_tool_loop_run(client, &msg, 1, tooling_json, tool_dispatch, NULL, 3);
+    bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, tool_dispatch, NULL, 3);
     assert_true(ok, "tool loop failed");
     assert_true(g_fake.post_calls == 2, "expected two post calls");
 
@@ -206,8 +242,57 @@ static bool test_tool_loop_includes_tool_calls(void) {
     return true;
 }
 
+static bool test_tool_loop_params_passthrough(void) {
+    fake_reset();
+    g_fake.post_responses[0] =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
+    g_fake.post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
+
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {1000, 2000, 2000};
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = 1024;
+    limits.max_frame_bytes = 1024;
+    limits.max_sse_buffer_bytes = 64 * 1024;
+    limits.max_tool_args_bytes_per_call = 1024;
+    llm_client_t* client = llm_client_create("http://fake", &model, &timeout, &limits);
+    assert_true(client != NULL, "client create failed");
+
+    const char* params_json = "{\"temperature\":0.2,\"seed\":44}";
+    const char* tooling_json =
+        "{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"add\"}}],"
+        "\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"add\"}}}";
+    const char* response_format_json = "{\"type\":\"json_object\"}";
+    llm_message_t msg = {LLM_ROLE_USER, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
+
+    bool ok =
+        llm_tool_loop_run(client, &msg, 1, params_json, tooling_json, response_format_json, tool_dispatch, NULL, 3);
+    assert_true(ok, "tool loop failed");
+    assert_true(g_fake.post_calls == 2, "expected two post calls");
+
+    for (size_t i = 0; i < g_fake.post_calls; i++) {
+        span_t temperature = {0};
+        span_t response_type = {0};
+        span_t tool_choice_name = {0};
+        assert_true(extract_request_controls(g_fake.request_bodies[i], g_fake.request_lens[i], &temperature,
+                                             &response_type, &tool_choice_name),
+                    "request controls missing");
+        assert_true(temperature.len == 3 && memcmp(temperature.ptr, "0.2", 3) == 0, "temperature mismatch");
+        assert_true(response_type.len == 11 && memcmp(response_type.ptr, "json_object", 11) == 0,
+                    "response_format mismatch");
+        assert_true(tool_choice_name.len == 3 && memcmp(tool_choice_name.ptr, "add", 3) == 0,
+                    "tool_choice name mismatch");
+    }
+
+    llm_client_destroy(client);
+    return true;
+}
+
 int main(void) {
     assert_true(test_tool_loop_includes_tool_calls(), "tool loop tool_calls request test failed");
+    assert_true(test_tool_loop_params_passthrough(), "tool loop params passthrough test failed");
     printf("Tool loop request tests passed.\n");
     return 0;
 }

@@ -97,7 +97,7 @@ int main(void) {
         "\"required\":[\"location\"]}}}]}";
     llm_message_t tool_messages[] = {{LLM_ROLE_USER, "What is the weather in London?", 30, NULL, 0, NULL, 0, NULL, 0}};
 
-    if (llm_tool_loop_run(client, tool_messages, 1, tooling, mock_dispatch, NULL, 3)) {
+    if (llm_tool_loop_run(client, tool_messages, 1, NULL, tooling, NULL, mock_dispatch, NULL, 3)) {
         printf("Tool loop finished successfully\n");
     } else {
         fprintf(stderr, "Tool loop failed\n");

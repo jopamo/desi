@@ -1272,10 +1272,10 @@ llm_error_t llm_chat_stream_choice_with_headers_ex(llm_client_t* client, const l
 
 // Tool loop implementation is usually complex, let's put a simplified version here
 llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_message_t* initial_messages,
-                                              size_t initial_count, const char* tooling_json,
-                                              llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                                              llm_abort_cb abort_cb, void* abort_user_data, size_t max_turns,
-                                              const char* const* headers, size_t headers_count) {
+                                              size_t initial_count, const char* params_json, const char* tooling_json,
+                                              const char* response_format_json, llm_tool_dispatch_cb dispatch,
+                                              void* dispatch_user_data, llm_abort_cb abort_cb, void* abort_user_data,
+                                              size_t max_turns, const char* const* headers, size_t headers_count) {
     size_t history_count = initial_count;
     llm_message_t* history = calloc(history_count, sizeof(llm_message_t));
     if (!history) {
@@ -1334,8 +1334,8 @@ llm_error_t llm_tool_loop_run_with_headers_ex(llm_client_t* client, const llm_me
             break;
         }
         llm_chat_result_t result;
-        if (!llm_chat_with_headers(client, history, history_count, NULL, tooling_json, NULL, &result, headers,
-                                   headers_count)) {
+        if (!llm_chat_with_headers(client, history, history_count, params_json, tooling_json, response_format_json,
+                                   &result, headers, headers_count)) {
             err = LLM_ERR_FAILED;
             break;
         }
@@ -1485,23 +1485,27 @@ cleanup_loop:
 }
 
 bool llm_tool_loop_run(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
-                       const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                       size_t max_turns) {
-    return llm_tool_loop_run_with_headers_ex(client, initial_messages, initial_count, tooling_json, dispatch,
-                                             dispatch_user_data, NULL, NULL, max_turns, NULL, 0) == LLM_ERR_NONE;
+                       const char* params_json, const char* tooling_json, const char* response_format_json,
+                       llm_tool_dispatch_cb dispatch, void* dispatch_user_data, size_t max_turns) {
+    return llm_tool_loop_run_with_headers_ex(client, initial_messages, initial_count, params_json, tooling_json,
+                                             response_format_json, dispatch, dispatch_user_data, NULL, NULL, max_turns,
+                                             NULL, 0) == LLM_ERR_NONE;
 }
 
 bool llm_tool_loop_run_with_headers(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
-                                    const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                                    size_t max_turns, const char* const* headers, size_t headers_count) {
-    return llm_tool_loop_run_with_headers_ex(client, initial_messages, initial_count, tooling_json, dispatch,
-                                             dispatch_user_data, NULL, NULL, max_turns, headers,
-                                             headers_count) == LLM_ERR_NONE;
+                                    const char* params_json, const char* tooling_json, const char* response_format_json,
+                                    llm_tool_dispatch_cb dispatch, void* dispatch_user_data, size_t max_turns,
+                                    const char* const* headers, size_t headers_count) {
+    return llm_tool_loop_run_with_headers_ex(client, initial_messages, initial_count, params_json, tooling_json,
+                                             response_format_json, dispatch, dispatch_user_data, NULL, NULL, max_turns,
+                                             headers, headers_count) == LLM_ERR_NONE;
 }
 
 llm_error_t llm_tool_loop_run_ex(llm_client_t* client, const llm_message_t* initial_messages, size_t initial_count,
-                                 const char* tooling_json, llm_tool_dispatch_cb dispatch, void* dispatch_user_data,
-                                 llm_abort_cb abort_cb, void* abort_user_data, size_t max_turns) {
-    return llm_tool_loop_run_with_headers_ex(client, initial_messages, initial_count, tooling_json, dispatch,
-                                             dispatch_user_data, abort_cb, abort_user_data, max_turns, NULL, 0);
+                                 const char* params_json, const char* tooling_json, const char* response_format_json,
+                                 llm_tool_dispatch_cb dispatch, void* dispatch_user_data, llm_abort_cb abort_cb,
+                                 void* abort_user_data, size_t max_turns) {
+    return llm_tool_loop_run_with_headers_ex(client, initial_messages, initial_count, params_json, tooling_json,
+                                             response_format_json, dispatch, dispatch_user_data, abort_cb,
+                                             abort_user_data, max_turns, NULL, 0);
 }

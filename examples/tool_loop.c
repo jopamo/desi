@@ -70,7 +70,7 @@ int main(void) {
 
     printf("User: %s\n", initial_msg[0].content);
 
-    if (llm_tool_loop_run(client, initial_msg, 1, tools, weather_dispatch, NULL, 5)) {
+    if (llm_tool_loop_run(client, initial_msg, 1, NULL, tools, NULL, weather_dispatch, NULL, 5)) {
         printf("Tool loop completed.\n");
     } else {
         fprintf(stderr, "Tool loop failed.\n");

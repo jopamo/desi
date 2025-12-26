@@ -227,7 +227,7 @@ static void test_tool_loop(llm_client_t* client) {
         return;
     }
 
-    if (llm_tool_loop_run(client, msgs, 1, tooling, math_dispatch, NULL, 5)) {
+    if (llm_tool_loop_run(client, msgs, 1, NULL, tooling, NULL, math_dispatch, NULL, 5)) {
         LOG("Tool loop completed successfully");
     } else {
         ASSERT(false, "Tool loop failed");

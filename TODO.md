@@ -97,7 +97,7 @@ Remaining work is about:
     * deterministic serialization
     * explicit size caps
 
-* [ ] **Tool loop parameter passthrough**
+* [x] **Tool loop parameter passthrough**
 
   * Allow caller to supply:
 

@@ -334,8 +334,8 @@ static bool test_tool_loop_cancel_between_turns(void) {
     llm_message_t msg = {LLM_ROLE_SYSTEM, "run tool", 8, NULL, 0, NULL, 0, NULL, 0};
     struct tool_state state = {0};
 
-    llm_error_t err =
-        llm_tool_loop_run_ex(client, &msg, 1, tooling_json, tool_dispatch, &state, abort_tool_loop, &state, 3);
+    llm_error_t err = llm_tool_loop_run_ex(client, &msg, 1, NULL, tooling_json, NULL, tool_dispatch, &state,
+                                           abort_tool_loop, &state, 3);
     assert_true(err == LLM_ERR_CANCELLED, "expected cancellation between turns");
     assert_true(state.called == 1, "expected one tool dispatch before cancel");
     assert_true(state.args_ok, "tool args parse failed");
