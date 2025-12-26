@@ -192,3 +192,48 @@ char* build_completions_request(const char* model, const char* prompt, size_t pr
 
     return b.data;
 }
+
+char* build_embeddings_request(const char* model, const llm_embedding_input_t* inputs, size_t inputs_count,
+                               const char* params_json, size_t max_input_bytes, size_t max_inputs) {
+    if (!model) return NULL;
+    if (inputs_count == 0) return NULL;
+    if (inputs_count > 0 && !inputs) return NULL;
+    if (max_inputs && inputs_count > max_inputs) return NULL;
+    for (size_t i = 0; i < inputs_count; i++) {
+        if (!inputs[i].text) return NULL;
+        if (max_input_bytes && inputs[i].text_len > max_input_bytes) return NULL;
+    }
+
+    struct growbuf b;
+    growbuf_init(&b, 4096);
+
+    append_lit(&b, "{\"model\":");
+    append_json_string(&b, model, strlen(model));
+    append_lit(&b, ",\"input\":[");
+    for (size_t i = 0; i < inputs_count; i++) {
+        if (i > 0) append_char(&b, ',');
+        append_json_string(&b, inputs[i].text, inputs[i].text_len);
+    }
+    append_char(&b, ']');
+
+    if (params_json) {
+        size_t p_len = strlen(params_json);
+        if (p_len > 2 && params_json[0] == '{' && params_json[p_len - 1] == '}') {
+            append_char(&b, ',');
+            growbuf_append(&b, params_json + 1, p_len - 2, 0);
+        } else if (p_len > 0) {
+            append_char(&b, ',');
+            growbuf_append(&b, params_json, p_len, 0);
+        }
+    }
+
+    append_char(&b, '}');
+    append_char(&b, '\0');
+
+    if (b.nomem) {
+        growbuf_free(&b);
+        return NULL;
+    }
+
+    return b.data;
+}

@@ -108,6 +108,8 @@ llm_client_t* llm_client_create_with_headers(const char* base_url, const llm_mod
         client->limits.max_response_bytes = 10 * 1024 * 1024;
         client->limits.max_line_bytes = 1024 * 1024;
         client->limits.max_tool_args_bytes_per_call = 1024 * 1024;
+        client->limits.max_embedding_input_bytes = 1024 * 1024;
+        client->limits.max_embedding_inputs = 1024;
     }
     client->tls_verify_peer = true;
     client->tls_verify_host = true;
@@ -556,6 +558,7 @@ int parse_completions_response(const char* json, size_t len, llm_completions_res
 int parse_completions_chunk(const char* json, size_t len, span_t* text_delta, llm_finish_reason_t* finish_reason);
 int parse_completions_chunk_choice(const char* json, size_t len, size_t choice_index, span_t* text_delta,
                                    llm_finish_reason_t* finish_reason);
+int parse_embeddings_response(const char* json, size_t len, llm_embeddings_result_t* result);
 
 bool llm_completions_with_headers(llm_client_t* client, const char* prompt, size_t prompt_len, const char* params_json,
                                   llm_completions_result_t* result, const char* const* headers, size_t headers_count) {
@@ -691,6 +694,58 @@ bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char
                                                 size_t headers_count) {
     return llm_completions_stream_with_headers_choice(client, prompt, prompt_len, params_json, choice_index, callbacks,
                                                       headers, headers_count);
+}
+
+bool llm_embeddings_with_headers(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
+                                 const char* params_json, llm_embeddings_result_t* result, const char* const* headers,
+                                 size_t headers_count) {
+    char url[1024];
+    snprintf(url, sizeof(url), "%s/v1/embeddings", client->base_url);
+
+    char* request_json =
+        build_embeddings_request(client->model.name, inputs, inputs_count, params_json,
+                                 client->limits.max_embedding_input_bytes, client->limits.max_embedding_inputs);
+    if (!request_json) return false;
+
+    char* response_body = NULL;
+    size_t response_len = 0;
+    struct header_set header_set;
+    if (!llm_header_set_init(&header_set, client, headers, headers_count)) {
+        free(request_json);
+        return false;
+    }
+    llm_tls_config_t tls;
+    const llm_tls_config_t* tls_ptr = llm_client_tls_config(client, &tls);
+    bool ok = http_post(url, request_json, client->timeout.overall_timeout_ms, client->limits.max_response_bytes,
+                        header_set.headers, header_set.count, tls_ptr, client->proxy_url, client->no_proxy,
+                        &response_body, &response_len);
+    header_set_free(&header_set);
+    free(request_json);
+
+    if (ok) {
+        memset(result, 0, sizeof(*result));
+        int res = parse_embeddings_response(response_body, response_len, result);
+        if (res < 0) {
+            free(response_body);
+            ok = false;
+        } else {
+            result->_internal = response_body;
+        }
+    }
+    return ok;
+}
+
+bool llm_embeddings(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
+                    const char* params_json, llm_embeddings_result_t* result) {
+    return llm_embeddings_with_headers(client, inputs, inputs_count, params_json, result, NULL, 0);
+}
+
+void llm_embeddings_free(llm_embeddings_result_t* result) {
+    if (result) {
+        free(result->data);
+        free(result->_internal);
+        memset(result, 0, sizeof(*result));
+    }
 }
 
 bool llm_chat_with_headers(llm_client_t* client, const llm_message_t* messages, size_t messages_count,

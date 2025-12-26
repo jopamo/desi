@@ -11,4 +11,7 @@ char* build_chat_request(const char* model, const llm_message_t* messages, size_
 char* build_completions_request(const char* model, const char* prompt, size_t prompt_len, bool stream,
                                 const char* params_json);
 
+char* build_embeddings_request(const char* model, const llm_embedding_input_t* inputs, size_t inputs_count,
+                               const char* params_json, size_t max_input_bytes, size_t max_inputs);
+
 #endif  // JSON_BUILD_H

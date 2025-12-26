@@ -26,6 +26,8 @@ struct fake_transport_state {
     const char* response_post;
     char* last_body;
     size_t last_body_len;
+    char* last_request_body;
+    size_t last_request_len;
     const char* stream_payload;
     size_t stream_payload_len;
     size_t stream_chunk_size;
@@ -42,7 +44,10 @@ struct fake_transport_state {
 
 static struct fake_transport_state g_fake;
 
-static void fake_reset(void) { memset(&g_fake, 0, sizeof(g_fake)); }
+static void fake_reset(void) {
+    free(g_fake.last_request_body);
+    memset(&g_fake, 0, sizeof(g_fake));
+}
 
 static bool header_list_contains(const char* const* headers, size_t headers_count, const char* expected) {
     for (size_t i = 0; i < headers_count; i++) {
@@ -131,6 +136,80 @@ cleanup:
     return ok;
 }
 
+static bool extract_string_field(const char* json, size_t len, const char* key, span_t* out) {
+    bool ok = false;
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    if (parsed <= 0) goto cleanup;
+    if (tokens[0].type != JSTOK_OBJECT) goto cleanup;
+    int key_idx = obj_get_key(tokens, parsed, 0, json, key);
+    if (key_idx < 0 || tokens[key_idx].type != JSTOK_STRING) goto cleanup;
+    *out = tok_span(json, &tokens[key_idx]);
+    ok = true;
+
+cleanup:
+    free(tokens);
+    return ok;
+}
+
+static bool extract_embedding_input_at(const char* json, size_t len, size_t input_index, span_t* out) {
+    bool ok = false;
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    if (parsed <= 0) goto cleanup;
+    if (tokens[0].type != JSTOK_OBJECT) goto cleanup;
+    int input_idx = obj_get_key(tokens, parsed, 0, json, "input");
+    if (input_idx < 0 || tokens[input_idx].type != JSTOK_ARRAY) goto cleanup;
+    if (input_index >= (size_t)tokens[input_idx].size) goto cleanup;
+    int item_idx = arr_get(tokens, parsed, input_idx, (int)input_index);
+    if (item_idx < 0 || tokens[item_idx].type != JSTOK_STRING) goto cleanup;
+    *out = tok_span(json, &tokens[item_idx]);
+    ok = true;
+
+cleanup:
+    free(tokens);
+    return ok;
+}
+
+static bool extract_embedding_span_at(const char* json, size_t len, size_t index, span_t* out) {
+    bool ok = false;
+    jstok_parser parser;
+    jstok_init(&parser);
+    int needed = jstok_parse(&parser, json, (int)len, NULL, 0);
+    if (needed <= 0) return false;
+    jstoktok_t* tokens = malloc((size_t)needed * sizeof(*tokens));
+    if (!tokens) return false;
+    jstok_init(&parser);
+    int parsed = jstok_parse(&parser, json, (int)len, tokens, needed);
+    if (parsed <= 0) goto cleanup;
+    if (tokens[0].type != JSTOK_OBJECT) goto cleanup;
+    int data_idx = obj_get_key(tokens, parsed, 0, json, "data");
+    if (data_idx < 0 || tokens[data_idx].type != JSTOK_ARRAY || tokens[data_idx].size <= 0) goto cleanup;
+    if (index >= (size_t)tokens[data_idx].size) goto cleanup;
+    int item_idx = arr_get(tokens, parsed, data_idx, (int)index);
+    if (item_idx < 0 || tokens[item_idx].type != JSTOK_OBJECT) goto cleanup;
+    int emb_idx = obj_get_key(tokens, parsed, item_idx, json, "embedding");
+    if (emb_idx < 0 || tokens[emb_idx].type != JSTOK_ARRAY) goto cleanup;
+    *out = tok_span(json, &tokens[emb_idx]);
+    ok = true;
+
+cleanup:
+    free(tokens);
+    return ok;
+}
+
 bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
               size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
               char** body, size_t* len) {
@@ -169,12 +248,23 @@ bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const
 bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
                const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
                const char* no_proxy, char** body, size_t* len) {
-    (void)json_body;
     (void)timeout_ms;
     (void)max_response_bytes;
     (void)tls;
 
     g_fake.called_post = true;
+    free(g_fake.last_request_body);
+    g_fake.last_request_body = NULL;
+    g_fake.last_request_len = 0;
+    if (json_body) {
+        size_t req_len = strlen(json_body);
+        char* req = malloc(req_len + 1);
+        if (!req) return false;
+        memcpy(req, json_body, req_len);
+        req[req_len] = '\0';
+        g_fake.last_request_body = req;
+        g_fake.last_request_len = req_len;
+    }
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
     g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
@@ -205,12 +295,23 @@ bool http_post(const char* url, const char* json_body, long timeout_ms, size_t m
 bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
                       const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
                       const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data) {
-    (void)json_body;
     (void)timeout_ms;
     (void)read_idle_timeout_ms;
     (void)tls;
 
     g_fake.called_stream = true;
+    free(g_fake.last_request_body);
+    g_fake.last_request_body = NULL;
+    g_fake.last_request_len = 0;
+    if (json_body) {
+        size_t req_len = strlen(json_body);
+        char* req = malloc(req_len + 1);
+        if (!req) return false;
+        memcpy(req, json_body, req_len);
+        req[req_len] = '\0';
+        g_fake.last_request_body = req;
+        g_fake.last_request_len = req_len;
+    }
     g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
     g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
     if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
@@ -270,6 +371,22 @@ static llm_client_t* make_client(const char* base_url, const char* const* header
     if (headers && headers_count > 0) {
         return llm_client_create_with_headers(base_url, &model, &timeout, &limits, headers, headers_count);
     }
+    return llm_client_create(base_url, &model, &timeout, &limits);
+}
+
+static llm_client_t* make_client_with_embedding_limits(const char* base_url, size_t max_input_bytes,
+                                                       size_t max_inputs) {
+    llm_model_t model = {"test-model"};
+    llm_timeout_t timeout = {0};
+    timeout.connect_timeout_ms = 1000;
+    timeout.overall_timeout_ms = 2000;
+    timeout.read_idle_timeout_ms = 2000;
+    llm_limits_t limits = {0};
+    limits.max_response_bytes = 64 * 1024;
+    limits.max_line_bytes = 1024;
+    limits.max_tool_args_bytes_per_call = 1024;
+    limits.max_embedding_input_bytes = max_input_bytes;
+    limits.max_embedding_inputs = max_inputs;
     return llm_client_create(base_url, &model, &timeout, &limits);
 }
 
@@ -597,6 +714,109 @@ static bool test_contract_completions_stream_choice_index(void) {
     return true;
 }
 
+static bool test_contract_embeddings_request_and_parse(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/embeddings";
+    g_fake.response_post = "{\"data\":[{\"embedding\":[0.1,0.2,0.3]},{\"embedding\":[-1,2]}]}";
+
+    llm_client_t* client = make_client("http://fake", NULL, 0);
+    if (!require(client, "client create failed")) return false;
+
+    llm_embedding_input_t inputs[] = {
+        {"alpha", 5},
+        {"beta", 4},
+    };
+    llm_embeddings_result_t res = {0};
+    bool ok = llm_embeddings(client, inputs, 2, "{\"user\":\"test\"}", &res);
+    if (!require(ok, "llm_embeddings failed")) return false;
+    if (!require(res._internal == g_fake.last_body, "response buffer not transferred")) return false;
+    if (!require(res.data_count == 2, "expected 2 embeddings")) return false;
+
+    if (!require(g_fake.last_request_body != NULL, "missing request body")) return false;
+    span_t model = {0};
+    if (!require(extract_string_field(g_fake.last_request_body, g_fake.last_request_len, "model", &model),
+                 "missing model field"))
+        return false;
+    if (!require(model.len == 10 && memcmp(model.ptr, "test-model", 10) == 0, "model mismatch")) return false;
+
+    span_t user = {0};
+    if (!require(extract_string_field(g_fake.last_request_body, g_fake.last_request_len, "user", &user),
+                 "missing user field"))
+        return false;
+    if (!require(user.len == 4 && memcmp(user.ptr, "test", 4) == 0, "user mismatch")) return false;
+
+    span_t input0 = {0};
+    span_t input1 = {0};
+    if (!require(extract_embedding_input_at(g_fake.last_request_body, g_fake.last_request_len, 0, &input0),
+                 "missing input[0]"))
+        return false;
+    if (!require(extract_embedding_input_at(g_fake.last_request_body, g_fake.last_request_len, 1, &input1),
+                 "missing input[1]"))
+        return false;
+    if (!require(input0.len == inputs[0].text_len, "input[0] length mismatch")) return false;
+    if (!require(memcmp(input0.ptr, inputs[0].text, inputs[0].text_len) == 0, "input[0] mismatch")) return false;
+    if (!require(input1.len == inputs[1].text_len, "input[1] length mismatch")) return false;
+    if (!require(memcmp(input1.ptr, inputs[1].text, inputs[1].text_len) == 0, "input[1] mismatch")) return false;
+
+    span_t expected0 = {0};
+    span_t expected1 = {0};
+    if (!require(extract_embedding_span_at(g_fake.last_body, g_fake.last_body_len, 0, &expected0),
+                 "embedding[0] parse failed"))
+        return false;
+    if (!require(extract_embedding_span_at(g_fake.last_body, g_fake.last_body_len, 1, &expected1),
+                 "embedding[1] parse failed"))
+        return false;
+    if (!require(res.data[0].embedding_len == expected0.len, "embedding[0] length mismatch")) return false;
+    if (!require(memcmp(res.data[0].embedding, expected0.ptr, expected0.len) == 0, "embedding[0] mismatch"))
+        return false;
+    if (!require(res.data[1].embedding_len == expected1.len, "embedding[1] length mismatch")) return false;
+    if (!require(memcmp(res.data[1].embedding, expected1.ptr, expected1.len) == 0, "embedding[1] mismatch"))
+        return false;
+
+    llm_embeddings_free(&res);
+    llm_client_destroy(client);
+    if (!require(g_fake.headers_ok, "headers unstable during embeddings request")) return false;
+    return true;
+}
+
+static bool test_contract_embeddings_limits(void) {
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/embeddings";
+    g_fake.response_post = "{\"data\":[{\"embedding\":[0]}]}";
+
+    llm_client_t* client = make_client_with_embedding_limits("http://fake", 8, 1);
+    if (!require(client, "client create failed")) return false;
+
+    llm_embedding_input_t inputs[] = {
+        {"alpha", 5},
+        {"beta", 4},
+    };
+    llm_embeddings_result_t res = {0};
+    bool ok = llm_embeddings(client, inputs, 2, NULL, &res);
+    if (!require(!ok, "llm_embeddings should fail on input count cap")) return false;
+    if (!require(!g_fake.called_post, "transport should not run on input count cap")) return false;
+
+    llm_client_destroy(client);
+
+    fake_reset();
+    g_fake.headers_ok = true;
+    g_fake.expected_url = "http://fake/v1/embeddings";
+    g_fake.response_post = "{\"data\":[{\"embedding\":[0]}]}";
+
+    client = make_client_with_embedding_limits("http://fake", 3, 2);
+    if (!require(client, "client create failed")) return false;
+
+    llm_embedding_input_t long_input = {"alpha", 5};
+    ok = llm_embeddings(client, &long_input, 1, NULL, &res);
+    if (!require(!ok, "llm_embeddings should fail on input length cap")) return false;
+    if (!require(!g_fake.called_post, "transport should not run on input length cap")) return false;
+
+    llm_client_destroy(client);
+    return true;
+}
+
 static bool test_contract_proxy_passthrough(void) {
     fake_reset();
     g_fake.headers_ok = true;
@@ -713,6 +933,8 @@ int main(void) {
     if (!test_contract_chat_stream_choice_index()) return 1;
     if (!test_contract_completions_streaming_headers()) return 1;
     if (!test_contract_completions_stream_choice_index()) return 1;
+    if (!test_contract_embeddings_request_and_parse()) return 1;
+    if (!test_contract_embeddings_limits()) return 1;
     if (!test_contract_proxy_passthrough()) return 1;
     if (!test_contract_failure_propagation()) return 1;
     printf("Transport contract tests passed.\n");

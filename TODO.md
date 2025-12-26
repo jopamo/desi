@@ -111,7 +111,7 @@ The library is functional end-to-end, but the remaining work is about:
     - choices ordering stability
     - missing indexes produce a stable error
 
-- [ ] **Embeddings endpoint**
+- [x] **Embeddings endpoint**
   - Request builder with explicit bounds:
     - input length caps
     - number-of-inputs caps

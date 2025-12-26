@@ -23,6 +23,8 @@ typedef struct {
     size_t max_response_bytes;
     size_t max_line_bytes;  // for SSE
     size_t max_tool_args_bytes_per_call;
+    size_t max_embedding_input_bytes;
+    size_t max_embedding_inputs;
 } llm_limits_t;
 
 typedef enum {
@@ -195,6 +197,22 @@ typedef struct {
     void* _internal;  // Internal buffer for spans
 } llm_completions_result_t;
 
+typedef struct {
+    const char* text;
+    size_t text_len;
+} llm_embedding_input_t;
+
+typedef struct {
+    const char* embedding;
+    size_t embedding_len;
+} llm_embedding_item_t;
+
+typedef struct {
+    llm_embedding_item_t* data;  // array
+    size_t data_count;
+    void* _internal;  // Internal buffer for spans
+} llm_embeddings_result_t;
+
 // Completions (non-stream)
 // Returns text spans into the response buffer
 bool llm_completions(llm_client_t* client, const char* prompt, size_t prompt_len,
@@ -216,6 +234,15 @@ bool llm_completions_stream_choice_with_headers(llm_client_t* client, const char
                                                 const char* params_json, size_t choice_index,
                                                 const llm_stream_callbacks_t* callbacks, const char* const* headers,
                                                 size_t headers_count);
+
+// Embeddings (non-stream)
+// Returns embedding spans into the response buffer
+bool llm_embeddings(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
+                    const char* params_json, llm_embeddings_result_t* result);
+bool llm_embeddings_with_headers(llm_client_t* client, const llm_embedding_input_t* inputs, size_t inputs_count,
+                                 const char* params_json, llm_embeddings_result_t* result, const char* const* headers,
+                                 size_t headers_count);
+void llm_embeddings_free(llm_embeddings_result_t* result);
 
 // Chat non-stream
 bool llm_chat(llm_client_t* client, const llm_message_t* messages, size_t messages_count,
