@@ -58,6 +58,19 @@ void llm_error_detail_free(llm_error_detail_t* detail) {
     error_detail_clear(detail);
 }
 
+const char* llm_errstr(llm_error_t code) {
+    switch (code) {
+        case LLM_ERR_NONE:
+            return "none";
+        case LLM_ERR_CANCELLED:
+            return "cancelled";
+        case LLM_ERR_FAILED:
+            return "failed";
+        default:
+            return "unknown";
+    }
+}
+
 static void error_detail_set_http_status(llm_error_detail_t* detail, long http_status) {
     if (!detail || http_status <= 0) return;
     detail->http_status = http_status;

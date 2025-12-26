@@ -259,6 +259,8 @@ const llm_error_detail_t* llm_client_last_error(const llm_client_t* client);
 
 // Error detail lifetime: free any owned raw body buffer.
 void llm_error_detail_free(llm_error_detail_t* detail);
+// Returns a stable, non-formatted string for an error code.
+const char* llm_errstr(llm_error_t code);
 
 // Health check
 bool llm_health(llm_client_t* client);

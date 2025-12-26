@@ -217,6 +217,15 @@ if get_option('tests')
   )
   test('error_detail', test_error_detail)
 
+  test_errstr = executable('test_errstr',
+    'tests/test_errstr.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('errstr', test_errstr)
+
   test_last_error = executable('test_last_error',
     'tests/test_last_error.c',
     'src/llm.c',

@@ -175,7 +175,7 @@ Remaining work is about:
     * document thread-safety rules
   * Never use global state
 
-* [ ] **Error stringification helper**
+* [x] **Error stringification helper**
 
   * Provide `llm_errstr(code)`
   * Output must be:
