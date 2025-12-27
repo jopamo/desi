@@ -237,29 +237,39 @@ static void test_tool_loop(llm_client_t* client) {
     print_sep("13) Tool loop: add then mul");
     const char* tooling =
         "{\"tools\":["
-        "{\"type\":\"function\",\"function\":{\"name\":\"add\",\"parameters\":{\"type\":\"object\",\"properties\":{"
-        "\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"]}}},"
-        "{\"type\":\"function\",\"function\":{\"name\":\"mul\",\"parameters\":{\"type\":\"object\",\"properties\":{"
-        "\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"]}}}"
+        "{\"type\":\"function\",\"function\":{\"name\":\"add\",\"description\":\"Add two integers\",\"parameters\":"
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}},"
+        "\"required\":[\"a\",\"b\"]}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"mul\",\"description\":\"Multiply two integers\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}}"
+        ","
+        "\"required\":[\"a\",\"b\"]}}}"
         "]}";
 
-    const char* sys_content = "Call tools to compute (12+30)*2. Output RESULT=<val>.";
+    const char* sys_content =
+        "Use tools only. First call add with a=12 and b=30. Then call mul with a=<result> and b=2. "
+        "Finally output RESULT=<val>.";
+    const char* usr_content = "Go.";
     llm_message_t msgs[] = {
-        {LLM_ROLE_SYSTEM, strdup(sys_content), strlen(sys_content), NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
+        {LLM_ROLE_SYSTEM, strdup(sys_content), strlen(sys_content), NULL, 0, NULL, 0, NULL, 0, NULL, 0},
+        {LLM_ROLE_USER, strdup(usr_content), strlen(usr_content), NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
 
     // Check for strdup failures
-    if (!msgs[0].content) {
+    if (!msgs[0].content || !msgs[1].content) {
+        if (msgs[0].content) free((char*)msgs[0].content);
+        if (msgs[1].content) free((char*)msgs[1].content);
         ASSERT(false, "Failed to strdup message content for test_tool_loop");
         return;
     }
 
-    if (llm_tool_loop_run(client, msgs, 1, NULL, tooling, NULL, math_dispatch, NULL, 5)) {
+    if (llm_tool_loop_run(client, msgs, 2, NULL, tooling, NULL, math_dispatch, NULL, 5)) {
         LOG("Tool loop completed successfully");
     } else {
         ASSERT(false, "Tool loop failed");
     }
 
     free((char*)msgs[0].content);
+    free((char*)msgs[1].content);
 }
 static void test_json_mode(llm_client_t* client) {
     print_sep("18) response_format json_object");

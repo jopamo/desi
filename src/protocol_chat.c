@@ -324,9 +324,11 @@ int parse_chat_chunk_choice(const char* json, size_t len, size_t choice_index, l
                     }
                     llm_tool_call_delta_t* td = &delta->tool_call_deltas[i];
                     int index_idx = obj_get_key(tokens, count, tool_idx, json, "index");
-                    if (index_idx >= 0 && tokens[index_idx].type == JSTOK_PRIMITIVE) {
-                        span_t sp = tok_span(json, &tokens[index_idx]);
-                        td->index = (size_t)atoi(sp.ptr);
+                    if (index_idx >= 0) {
+                        size_t idx_val = 0;
+                        if (parse_choice_index(json, &tokens[index_idx], &idx_val)) {
+                            td->index = idx_val;
+                        }
                     }
                     int id_idx = obj_get_key(tokens, count, tool_idx, json, "id");
                     if (id_idx >= 0 && tokens[id_idx].type == JSTOK_STRING) {
