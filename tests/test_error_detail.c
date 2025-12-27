@@ -7,6 +7,7 @@
 #define JSTOK_HEADER
 #include <jstok.h>
 
+#include "fake_transport.h"
 #include "llm/json_core.h"
 #include "llm/llm.h"
 #include "transport_curl.h"
@@ -19,116 +20,11 @@ static bool require(bool cond, const char* msg) {
     return true;
 }
 
-struct fake_transport_state {
-    const char* response_get;
-    const char* response_post;
-    const char* stream_payload;
-    size_t stream_payload_len;
-    long status_get;
-    long status_post;
-    long status_stream;
-    bool fail_get;
-    bool fail_post;
-    bool fail_stream;
-};
-
-static struct fake_transport_state g_fake;
+static fake_transport_state_t* g_fake;
 
 static void fake_reset(void) {
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.status_get = 200;
-    g_fake.status_post = 200;
-    g_fake.status_stream = 200;
-}
-
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = g_fake.status_get;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (g_fake.fail_get || !g_fake.response_get) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    size_t resp_len = strlen(g_fake.response_get);
-    char* resp = malloc(resp_len + 1);
-    if (!resp) return false;
-    memcpy(resp, g_fake.response_get, resp_len);
-    resp[resp_len] = '\0';
-    if (body) *body = resp;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = g_fake.status_post;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (g_fake.fail_post || !g_fake.response_post) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    size_t resp_len = strlen(g_fake.response_post);
-    char* resp = malloc(resp_len + 1);
-    if (!resp) return false;
-    memcpy(resp, g_fake.response_post, resp_len);
-    resp[resp_len] = '\0';
-    if (body) *body = resp;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
-                      llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)read_idle_timeout_ms;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = g_fake.status_stream;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (g_fake.fail_stream || !g_fake.stream_payload || g_fake.stream_payload_len == 0) {
-        if (status) status->http_status = 0;
-        return false;
-    }
-    return cb(g_fake.stream_payload, g_fake.stream_payload_len, user_data);
+    fake_transport_reset();
+    g_fake = fake_transport_state();
 }
 
 static bool parse_error_field(const char* json, size_t len, const char* field, span_t* out) {
@@ -199,8 +95,8 @@ static llm_client_t* make_client(const llm_limits_t* limits) {
 
 static bool test_http_error_detail(void) {
     fake_reset();
-    g_fake.status_get = 401;
-    g_fake.response_get =
+    g_fake->status_get = 401;
+    g_fake->response_get =
         "{\"error\":{\"message\":\"missing api key\",\"type\":\"auth_error\",\"code\":\"missing_api_key\"}}";
 
     llm_client_t* client = make_client(NULL);
@@ -223,8 +119,8 @@ static bool test_http_error_detail(void) {
 
 static bool test_malformed_error_body(void) {
     fake_reset();
-    g_fake.status_get = 401;
-    g_fake.response_get = "not-json";
+    g_fake->status_get = 401;
+    g_fake->response_get = "not-json";
 
     llm_client_t* client = make_client(NULL);
     if (!require(client != NULL, "client create")) return false;
@@ -234,7 +130,7 @@ static bool test_malformed_error_body(void) {
     llm_error_detail_t detail = {0};
     llm_error_t err = llm_props_get_ex(client, &json, &len, &detail);
     if (!require(err == LLM_ERR_FAILED, "props should fail on malformed error")) return false;
-    if (!require(detail.raw_body && detail.raw_body_len == strlen(g_fake.response_get), "raw body present"))
+    if (!require(detail.raw_body && detail.raw_body_len == strlen(g_fake->response_get), "raw body present"))
         return false;
 
     jstok_parser parser;
@@ -253,8 +149,8 @@ static bool test_malformed_error_body(void) {
 
 static bool test_json_parse_error_stage(void) {
     fake_reset();
-    g_fake.status_post = 200;
-    g_fake.response_post = "{\"choices\": [";
+    g_fake->status_post = 200;
+    g_fake->response_post = "{\"choices\": [";
 
     llm_client_t* client = make_client(NULL);
     if (!require(client != NULL, "client create")) return false;
@@ -272,9 +168,9 @@ static bool test_json_parse_error_stage(void) {
 
 static bool test_sse_error_stage(void) {
     fake_reset();
-    g_fake.status_stream = 200;
-    g_fake.stream_payload = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
-    g_fake.stream_payload_len = strlen(g_fake.stream_payload);
+    g_fake->status_stream = 200;
+    g_fake->stream_payload = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+    g_fake->stream_payload_len = strlen(g_fake->stream_payload);
 
     llm_limits_t limits = {0};
     limits.max_response_bytes = 1024;

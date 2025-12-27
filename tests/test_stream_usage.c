@@ -7,6 +7,7 @@
 #define JSTOK_HEADER
 #include <jstok.h>
 
+#include "fake_transport.h"
 #include "llm/llm.h"
 #include "transport_curl.h"
 
@@ -18,112 +19,11 @@ static bool require(bool cond, const char* msg) {
     return true;
 }
 
-struct fake_transport_state {
-    const char* stream_payload;
-    size_t stream_payload_len;
-    size_t stream_chunk_size;
-    char* request_body;
-    size_t request_len;
-    bool called_stream;
-};
-
-static struct fake_transport_state g_fake;
+static fake_transport_state_t* g_fake;
 
 static void fake_reset(void) {
-    free(g_fake.request_body);
-    memset(&g_fake, 0, sizeof(g_fake));
-}
-
-static bool capture_request(const char* json_body) {
-    if (!json_body) return false;
-    size_t len = strlen(json_body);
-    char* copy = malloc(len + 1);
-    if (!copy) return false;
-    memcpy(copy, json_body, len);
-    copy[len] = '\0';
-    free(g_fake.request_body);
-    g_fake.request_body = copy;
-    g_fake.request_len = len;
-    return true;
-}
-
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 0;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (body) *body = NULL;
-    if (len) *len = 0;
-    return false;
-}
-
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 0;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (body) *body = NULL;
-    if (len) *len = 0;
-    return false;
-}
-
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
-                      llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)read_idle_timeout_ms;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 200;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-
-    g_fake.called_stream = true;
-    if (!capture_request(json_body)) return false;
-    if (!g_fake.stream_payload || g_fake.stream_payload_len == 0) {
-        if (status) status->http_status = 0;
-        return false;
-    }
-
-    size_t chunk_size = g_fake.stream_chunk_size ? g_fake.stream_chunk_size : g_fake.stream_payload_len;
-    size_t offset = 0;
-    while (offset < g_fake.stream_payload_len) {
-        size_t remaining = g_fake.stream_payload_len - offset;
-        size_t take = remaining < chunk_size ? remaining : chunk_size;
-        if (!cb(g_fake.stream_payload + offset, take, user_data)) return false;
-        offset += take;
-    }
-    return true;
+    fake_transport_reset();
+    g_fake = fake_transport_state();
 }
 
 struct usage_capture {
@@ -196,9 +96,9 @@ static bool test_chat_usage_midstream(void) {
         "tokens\":7}}\n\n"
         "data: [DONE]\n\n";
 
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 7;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 7;
 
     llm_model_t model = {.name = "fake-model"};
     llm_client_t* client = llm_client_create("http://fake", &model, NULL, NULL);
@@ -214,12 +114,12 @@ static bool test_chat_usage_midstream(void) {
     bool ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &cbs);
     bool present = false;
     bool value = false;
-    bool parsed = parse_request_include_usage(g_fake.request_body, g_fake.request_len, &present, &value);
+    bool parsed = parse_request_include_usage(g_fake->last_request_body, g_fake->last_request_len, &present, &value);
 
     llm_client_destroy(client);
 
     if (!require(ok, "chat stream failed")) return false;
-    if (!require(g_fake.called_stream, "stream not called")) return false;
+    if (!require(g_fake->called_stream, "stream not called")) return false;
     if (!require(parsed, "parse request include_usage failed")) return false;
     if (!require(present && value, "include_usage not set")) return false;
     if (!require(cap.calls == 1, "usage callback count")) return false;
@@ -241,9 +141,9 @@ static bool test_completions_usage_completion_only(void) {
         "tokens\":1,\"total_tokens\":3}}\n\n"
         "data: [DONE]\n\n";
 
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 5;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 5;
 
     llm_model_t model = {.name = "fake-model"};
     llm_client_t* client = llm_client_create("http://fake", &model, NULL, NULL);
@@ -258,12 +158,12 @@ static bool test_completions_usage_completion_only(void) {
     bool ok = llm_completions_stream(client, "prompt", 6, NULL, &cbs);
     bool present = false;
     bool value = false;
-    bool parsed = parse_request_include_usage(g_fake.request_body, g_fake.request_len, &present, &value);
+    bool parsed = parse_request_include_usage(g_fake->last_request_body, g_fake->last_request_len, &present, &value);
 
     llm_client_destroy(client);
 
     if (!require(ok, "completions stream failed")) return false;
-    if (!require(g_fake.called_stream, "stream not called")) return false;
+    if (!require(g_fake->called_stream, "stream not called")) return false;
     if (!require(parsed, "parse request include_usage failed")) return false;
     if (!require(present && value, "include_usage not set")) return false;
     if (!require(cap.calls == 1, "usage callback count")) return false;
@@ -283,9 +183,9 @@ static bool test_chat_usage_omitted(void) {
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
         "data: [DONE]\n\n";
 
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 11;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 11;
 
     llm_model_t model = {.name = "fake-model"};
     llm_client_t* client = llm_client_create("http://fake", &model, NULL, NULL);
@@ -301,12 +201,12 @@ static bool test_chat_usage_omitted(void) {
     bool ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &cbs);
     bool present = false;
     bool value = false;
-    bool parsed = parse_request_include_usage(g_fake.request_body, g_fake.request_len, &present, &value);
+    bool parsed = parse_request_include_usage(g_fake->last_request_body, g_fake->last_request_len, &present, &value);
 
     llm_client_destroy(client);
 
     if (!require(ok, "chat stream failed")) return false;
-    if (!require(g_fake.called_stream, "stream not called")) return false;
+    if (!require(g_fake->called_stream, "stream not called")) return false;
     if (!require(parsed, "parse request include_usage failed")) return false;
     if (!require(present && value, "include_usage not set")) return false;
     if (!require(cap.calls == 0, "usage callback should not fire")) return false;

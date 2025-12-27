@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fake_transport.h"
 #include "llm/json_core.h"
 #include "llm/llm.h"
 #include "transport_curl.h"
@@ -16,69 +17,11 @@ static bool require(bool cond, const char* msg) {
     return true;
 }
 
-struct fake_transport_state {
-    const char* expected_url;
-    const char* const* expected_headers;
-    size_t expected_headers_count;
-    const char* expected_proxy_url;
-    const char* expected_no_proxy;
-    long status_get;
-    long status_post;
-    long status_stream;
-    const char* response_get;
-    const char* response_post;
-    char* last_body;
-    size_t last_body_len;
-    char* last_request_body;
-    size_t last_request_len;
-    const char* stream_payload;
-    size_t stream_payload_len;
-    size_t stream_chunk_size;
-    bool fail_get;
-    bool fail_post;
-    bool fail_stream;
-    bool called_get;
-    bool called_post;
-    bool called_stream;
-    bool headers_ok;
-    bool proxy_ok;
-    size_t stream_cb_calls;
-};
-
-static struct fake_transport_state g_fake;
+static fake_transport_state_t* g_fake;
 
 static void fake_reset(void) {
-    free(g_fake.last_request_body);
-    memset(&g_fake, 0, sizeof(g_fake));
-    g_fake.status_get = 200;
-    g_fake.status_post = 200;
-    g_fake.status_stream = 200;
-}
-
-static bool header_list_contains(const char* const* headers, size_t headers_count, const char* expected) {
-    for (size_t i = 0; i < headers_count; i++) {
-        if (headers[i] && strcmp(headers[i], expected) == 0) return true;
-    }
-    return false;
-}
-
-static bool check_headers(const char* const* headers, size_t headers_count) {
-    if (g_fake.expected_headers_count == 0) return true;
-    if (!headers || headers_count < g_fake.expected_headers_count) return false;
-    for (size_t i = 0; i < g_fake.expected_headers_count; i++) {
-        if (!header_list_contains(headers, headers_count, g_fake.expected_headers[i])) return false;
-    }
-    return true;
-}
-
-static bool check_proxy(const char* proxy_url, const char* no_proxy) {
-    if (g_fake.expected_proxy_url) {
-        if (!proxy_url || strcmp(proxy_url, g_fake.expected_proxy_url) != 0) return false;
-    }
-    if (g_fake.expected_no_proxy) {
-        if (!no_proxy || strcmp(no_proxy, g_fake.expected_no_proxy) != 0) return false;
-    }
-    return true;
+    fake_transport_reset();
+    g_fake = fake_transport_state();
 }
 
 static bool extract_choice_content_at(const char* json, size_t len, size_t choice_index, const char* obj_key,
@@ -276,159 +219,6 @@ cleanup:
     return ok;
 }
 
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len, llm_transport_status_t* status) {
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)tls;
-
-    if (status) {
-        status->http_status = g_fake.status_get;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    g_fake.called_get = true;
-    g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
-    g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
-    if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
-        g_fake.headers_ok = false;
-    }
-    if (g_fake.fail_get) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    if (!g_fake.response_get) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    size_t resp_len = strlen(g_fake.response_get);
-    char* resp = malloc(resp_len + 1);
-    if (!resp) return false;
-    memcpy(resp, g_fake.response_get, resp_len);
-    resp[resp_len] = '\0';
-    g_fake.last_body = resp;
-    g_fake.last_body_len = resp_len;
-    if (body) *body = resp;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)tls;
-
-    if (status) {
-        status->http_status = g_fake.status_post;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    g_fake.called_post = true;
-    free(g_fake.last_request_body);
-    g_fake.last_request_body = NULL;
-    g_fake.last_request_len = 0;
-    if (json_body) {
-        size_t req_len = strlen(json_body);
-        char* req = malloc(req_len + 1);
-        if (!req) return false;
-        memcpy(req, json_body, req_len);
-        req[req_len] = '\0';
-        g_fake.last_request_body = req;
-        g_fake.last_request_len = req_len;
-    }
-    g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
-    g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
-    if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
-        g_fake.headers_ok = false;
-    }
-    if (g_fake.fail_post) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    if (!g_fake.response_post) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    size_t resp_len = strlen(g_fake.response_post);
-    char* resp = malloc(resp_len + 1);
-    if (!resp) return false;
-    memcpy(resp, g_fake.response_post, resp_len);
-    resp[resp_len] = '\0';
-    g_fake.last_body = resp;
-    g_fake.last_body_len = resp_len;
-    if (body) *body = resp;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
-                      llm_transport_status_t* status) {
-    (void)timeout_ms;
-    (void)read_idle_timeout_ms;
-    (void)tls;
-
-    if (status) {
-        status->http_status = g_fake.status_stream;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    g_fake.called_stream = true;
-    free(g_fake.last_request_body);
-    g_fake.last_request_body = NULL;
-    g_fake.last_request_len = 0;
-    if (json_body) {
-        size_t req_len = strlen(json_body);
-        char* req = malloc(req_len + 1);
-        if (!req) return false;
-        memcpy(req, json_body, req_len);
-        req[req_len] = '\0';
-        g_fake.last_request_body = req;
-        g_fake.last_request_len = req_len;
-    }
-    g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
-    g_fake.proxy_ok = g_fake.proxy_ok && check_proxy(proxy_url, no_proxy);
-    if (g_fake.expected_url && strcmp(url, g_fake.expected_url) != 0) {
-        g_fake.headers_ok = false;
-    }
-    if (g_fake.fail_stream) {
-        if (status) status->http_status = 0;
-        return false;
-    }
-    if (!g_fake.stream_payload || g_fake.stream_payload_len == 0) return true;
-
-    const size_t chunk_size = g_fake.stream_chunk_size ? g_fake.stream_chunk_size : g_fake.stream_payload_len;
-    if (chunk_size > 128) return false;
-
-    char chunk[128];
-    size_t offset = 0;
-    while (offset < g_fake.stream_payload_len) {
-        size_t remaining = g_fake.stream_payload_len - offset;
-        size_t take = remaining < chunk_size ? remaining : chunk_size;
-        memcpy(chunk, g_fake.stream_payload + offset, take);
-        g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
-        bool keep = cb(chunk, take, user_data);
-        g_fake.stream_cb_calls++;
-        g_fake.headers_ok = g_fake.headers_ok && check_headers(headers, headers_count);
-        memset(chunk, 'x', take);
-        if (!keep) return false;
-        offset += take;
-    }
-    return true;
-}
-
 struct stream_capture {
     char content[64];
     size_t len;
@@ -521,9 +311,9 @@ static llm_client_t* make_client_with_stream_limits(const char* base_url, size_t
 
 static bool test_contract_body_ownership(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post = "{\"choices\":[{\"message\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->response_post = "{\"choices\":[{\"message\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -536,12 +326,12 @@ static bool test_contract_body_ownership(void) {
     llm_chat_result_t result;
     bool ok = llm_chat(client, &msg, 1, NULL, NULL, NULL, &result);
     if (!require(ok, "llm_chat failed")) return false;
-    if (!require(result._internal == g_fake.last_body, "response buffer not transferred")) return false;
+    if (!require(result._internal == g_fake->last_body, "response buffer not transferred")) return false;
     if (!require(result.content, "missing content span")) return false;
     if (!require(result.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
-    if (!require(extract_choice_content(g_fake.last_body, g_fake.last_body_len, "message", &expected),
+    if (!require(extract_choice_content(g_fake->last_body, g_fake->last_body_len, "message", &expected),
                  "content parse failed"))
         return false;
     if (!require(result.content_len == expected.len, "content length mismatch")) return false;
@@ -549,15 +339,15 @@ static bool test_contract_body_ownership(void) {
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during non-stream request")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during non-stream request")) return false;
     return true;
 }
 
 static bool test_contract_chat_multi_choice_order(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post =
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->response_post =
         "{\"choices\":[{\"message\":{\"content\":\"first\"},\"finish_reason\":\"stop\"},"
         "{\"message\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}";
 
@@ -576,10 +366,10 @@ static bool test_contract_chat_multi_choice_order(void) {
 
     span_t expected0 = {0};
     span_t expected1 = {0};
-    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 0, "message", &expected0),
+    if (!require(extract_choice_content_at(g_fake->last_body, g_fake->last_body_len, 0, "message", &expected0),
                  "choice 0 parse failed"))
         return false;
-    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 1, "message", &expected1),
+    if (!require(extract_choice_content_at(g_fake->last_body, g_fake->last_body_len, 1, "message", &expected1),
                  "choice 1 parse failed"))
         return false;
     if (!require(result.choices[0].content_len == expected0.len, "choice 0 length mismatch")) return false;
@@ -600,15 +390,15 @@ static bool test_contract_chat_multi_choice_order(void) {
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during chat choices")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during chat choices")) return false;
     return true;
 }
 
 static bool test_contract_completions_multi_choice_order(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/completions";
-    g_fake.response_post = "{\"choices\":[{\"text\":\"alpha\"},{\"text\":\"beta\"}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/completions";
+    g_fake->response_post = "{\"choices\":[{\"text\":\"alpha\"},{\"text\":\"beta\"}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -617,15 +407,15 @@ static bool test_contract_completions_multi_choice_order(void) {
     llm_completions_result_t res = {0};
     bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &res);
     if (!require(ok, "llm_completions failed")) return false;
-    if (!require(res._internal == g_fake.last_body, "response buffer not transferred")) return false;
+    if (!require(res._internal == g_fake->last_body, "response buffer not transferred")) return false;
     if (!require(res.choices_count == 2, "expected 2 completion choices")) return false;
 
     span_t expected0 = {0};
     span_t expected1 = {0};
-    if (!require(extract_completion_text_at(g_fake.last_body, g_fake.last_body_len, 0, &expected0),
+    if (!require(extract_completion_text_at(g_fake->last_body, g_fake->last_body_len, 0, &expected0),
                  "completion 0 parse failed"))
         return false;
-    if (!require(extract_completion_text_at(g_fake.last_body, g_fake.last_body_len, 1, &expected1),
+    if (!require(extract_completion_text_at(g_fake->last_body, g_fake->last_body_len, 1, &expected1),
                  "completion 1 parse failed"))
         return false;
     if (!require(res.choices[0].text_len == expected0.len, "completion 0 length mismatch")) return false;
@@ -642,15 +432,15 @@ static bool test_contract_completions_multi_choice_order(void) {
 
     llm_completions_free(&res);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during completions choices")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during completions choices")) return false;
     return true;
 }
 
 static bool test_contract_finish_reason_variants(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post =
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->response_post =
         "{\"choices\":["
         "{\"message\":{\"content\":\"alpha\"},\"finish_reason\":\"length\"},"
         "{\"message\":{\"content\":\"beta\"},\"finish_reason\":\"content_filter\"},"
@@ -681,13 +471,13 @@ static bool test_contract_finish_reason_variants(void) {
     span_t expected0 = {0};
     span_t expected1 = {0};
     span_t expected2 = {0};
-    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 0, "message", &expected0),
+    if (!require(extract_choice_content_at(g_fake->last_body, g_fake->last_body_len, 0, "message", &expected0),
                  "choice 0 content parse failed"))
         return false;
-    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 1, "message", &expected1),
+    if (!require(extract_choice_content_at(g_fake->last_body, g_fake->last_body_len, 1, "message", &expected1),
                  "choice 1 content parse failed"))
         return false;
-    if (!require(extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 2, "message", &expected2),
+    if (!require(extract_choice_content_at(g_fake->last_body, g_fake->last_body_len, 2, "message", &expected2),
                  "choice 2 content parse failed"))
         return false;
     if (!require(result.choices[0].content_len == expected0.len, "choice 0 content length mismatch")) return false;
@@ -702,15 +492,15 @@ static bool test_contract_finish_reason_variants(void) {
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during finish reason variants")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during finish reason variants")) return false;
     return true;
 }
 
 static bool test_contract_optional_fields_missing(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post = "{\"choices\":[{\"message\":{},\"finish_reason\":\"stop\"}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->response_post = "{\"choices\":[{\"message\":{},\"finish_reason\":\"stop\"}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -734,26 +524,26 @@ static bool test_contract_optional_fields_missing(void) {
         return false;
 
     span_t content = {0};
-    if (!require(!extract_choice_content_at(g_fake.last_body, g_fake.last_body_len, 0, "message", &content),
+    if (!require(!extract_choice_content_at(g_fake->last_body, g_fake->last_body_len, 0, "message", &content),
                  "content should be missing"))
         return false;
     span_t reasoning = {0};
-    if (!require(!extract_choice_message_field_at(g_fake.last_body, g_fake.last_body_len, 0, "reasoning_content",
+    if (!require(!extract_choice_message_field_at(g_fake->last_body, g_fake->last_body_len, 0, "reasoning_content",
                                                   &reasoning),
                  "reasoning_content should be missing"))
         return false;
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during optional fields")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during optional fields")) return false;
     return true;
 }
 
 static bool test_contract_reasoning_variants(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post =
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->response_post =
         "{\"choices\":[{\"message\":{\"content\":\"hi\",\"reasoning_content\":\"trace\"},\"finish_reason\":\"stop\"}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
@@ -769,21 +559,21 @@ static bool test_contract_reasoning_variants(void) {
     if (!require(ok, "llm_chat failed")) return false;
 
     span_t expected = {0};
-    if (!require(
-            extract_choice_message_field_at(g_fake.last_body, g_fake.last_body_len, 0, "reasoning_content", &expected),
-            "reasoning_content parse failed"))
+    if (!require(extract_choice_message_field_at(g_fake->last_body, g_fake->last_body_len, 0, "reasoning_content",
+                                                 &expected),
+                 "reasoning_content parse failed"))
         return false;
     if (!require(result.reasoning_content_len == expected.len, "reasoning length mismatch")) return false;
     if (!require(memcmp(result.reasoning_content, expected.ptr, expected.len) == 0, "reasoning mismatch")) return false;
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during reasoning_content")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during reasoning_content")) return false;
 
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.response_post =
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->response_post =
         "{\"choices\":[{\"message\":{\"content\":\"hi\",\"thinking\":\"plan\"},\"finish_reason\":\"stop\"}]}";
 
     client = make_client("http://fake", NULL, 0);
@@ -795,7 +585,7 @@ static bool test_contract_reasoning_variants(void) {
 
     expected.ptr = NULL;
     expected.len = 0;
-    if (!require(extract_choice_message_field_at(g_fake.last_body, g_fake.last_body_len, 0, "thinking", &expected),
+    if (!require(extract_choice_message_field_at(g_fake->last_body, g_fake->last_body_len, 0, "thinking", &expected),
                  "thinking parse failed"))
         return false;
     if (!require(result.reasoning_content_len == expected.len, "thinking length mismatch")) return false;
@@ -803,14 +593,14 @@ static bool test_contract_reasoning_variants(void) {
 
     llm_chat_result_free(&result);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during thinking")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during thinking")) return false;
     return true;
 }
 
 static bool test_contract_stream_thinking_delta(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
 
     static const char stream_json[] = "{\"choices\":[{\"delta\":{\"thinking\":\"alpha\"},\"finish_reason\":\"stop\"}]}";
     static const char stream_sse[] =
@@ -818,9 +608,9 @@ static bool test_contract_stream_thinking_delta(void) {
         "{\"choices\":[{\"delta\":{\"thinking\":\"alpha\"},\"finish_reason\":\"stop\"}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 16;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 16;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -840,7 +630,7 @@ static bool test_contract_stream_thinking_delta(void) {
 
     bool ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &callbacks);
     if (!require(ok, "llm_chat_stream failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
@@ -851,15 +641,15 @@ static bool test_contract_stream_thinking_delta(void) {
     if (!require(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream thinking mismatch")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during thinking stream")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during thinking stream")) return false;
     return true;
 }
 
 static bool test_contract_model_switching(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/completions";
-    g_fake.response_post = "{\"choices\":[{\"text\":\"ok\"}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/completions";
+    g_fake->response_post = "{\"choices\":[{\"text\":\"ok\"}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -871,10 +661,10 @@ static bool test_contract_model_switching(void) {
     llm_completions_result_t res = {0};
     bool ok = llm_completions(client, prompt, strlen(prompt), NULL, &res);
     if (!require(ok, "llm_completions failed")) return false;
-    if (!require(g_fake.last_request_body != NULL, "missing request body")) return false;
+    if (!require(g_fake->last_request_body != NULL, "missing request body")) return false;
 
     span_t model_span = {0};
-    if (!require(extract_string_field(g_fake.last_request_body, g_fake.last_request_len, "model", &model_span),
+    if (!require(extract_string_field(g_fake->last_request_body, g_fake->last_request_len, "model", &model_span),
                  "missing model field"))
         return false;
     if (!require(model_span.len == strlen(model.name), "model length mismatch")) return false;
@@ -882,14 +672,14 @@ static bool test_contract_model_switching(void) {
 
     llm_completions_free(&res);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during model switch")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during model switch")) return false;
     return true;
 }
 
 static bool test_contract_streaming_headers(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
 
     static const char stream_json[] = "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}";
     static const char stream_sse[] =
@@ -897,9 +687,9 @@ static bool test_contract_streaming_headers(void) {
         "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 16;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 16;
 
     const char* client_headers[] = {"X-Client: alpha"};
     llm_client_t* client = make_client("http://fake", client_headers, 1);
@@ -908,8 +698,8 @@ static bool test_contract_streaming_headers(void) {
 
     const char* request_headers[] = {"X-Request: beta"};
     const char* expected_headers[] = {"X-Client: alpha", "Authorization: Bearer token", "X-Request: beta"};
-    g_fake.expected_headers = expected_headers;
-    g_fake.expected_headers_count = 3;
+    g_fake->expected_headers = expected_headers;
+    g_fake->expected_headers_count = 3;
 
     llm_message_t msg = {0};
     msg.role = LLM_ROLE_USER;
@@ -926,8 +716,8 @@ static bool test_contract_streaming_headers(void) {
 
     bool ok = llm_chat_stream_with_headers(client, &msg, 1, NULL, NULL, NULL, &callbacks, request_headers, 1);
     if (!require(ok, "llm_chat_stream failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
-    if (!require(g_fake.headers_ok, "headers unstable during stream callbacks")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during stream callbacks")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
@@ -943,8 +733,8 @@ static bool test_contract_streaming_headers(void) {
 
 static bool test_contract_chat_stream_choice_index(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
 
     static const char stream_json[] =
         "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"zero\"},\"finish_reason\":null},"
@@ -955,9 +745,9 @@ static bool test_contract_chat_stream_choice_index(void) {
         "{\"index\":1,\"delta\":{\"content\":\"one\"},\"finish_reason\":\"stop\"}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 32;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 32;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -977,7 +767,7 @@ static bool test_contract_chat_stream_choice_index(void) {
 
     bool ok = llm_chat_stream_choice(client, &msg, 1, NULL, NULL, NULL, 1, &callbacks);
     if (!require(ok, "llm_chat_stream_choice failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
@@ -988,14 +778,14 @@ static bool test_contract_chat_stream_choice_index(void) {
     if (!require(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream content mismatch")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during chat stream choice")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during chat stream choice")) return false;
     return true;
 }
 
 static bool test_contract_chat_stream_choice_index_missing(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
 
     static const char stream_json[] =
         "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"zero\"},\"finish_reason\":null},"
@@ -1006,9 +796,9 @@ static bool test_contract_chat_stream_choice_index_missing(void) {
         "{\"index\":1,\"delta\":{\"content\":\"one\"},\"finish_reason\":\"stop\"}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 32;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 32;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1028,7 +818,7 @@ static bool test_contract_chat_stream_choice_index_missing(void) {
 
     bool ok = llm_chat_stream_choice(client, &msg, 1, NULL, NULL, NULL, 2, &callbacks);
     if (!require(ok, "llm_chat_stream_choice failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_UNKNOWN, "finish reason should be unknown")) return false;
     if (!require(cap.len == 0, "missing choice should not emit content")) return false;
 
@@ -1039,22 +829,22 @@ static bool test_contract_chat_stream_choice_index_missing(void) {
     if (!require(expected.len > 0, "stream content should exist")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during chat stream missing choice")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during chat stream missing choice")) return false;
     return true;
 }
 
 static bool test_contract_completions_streaming_headers(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/completions";
 
     static const char stream_sse[] =
         "data: {\"choices\":[{\"text\":\"hi\",\"finish_reason\":null}]}\n\n"
         "data: {\"choices\":[{\"text\":\"!\",\"finish_reason\":\"stop\"}]}\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 12;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 12;
 
     const char* client_headers[] = {"X-Client: alpha"};
     llm_client_t* client = make_client("http://fake", client_headers, 1);
@@ -1063,8 +853,8 @@ static bool test_contract_completions_streaming_headers(void) {
 
     const char* request_headers[] = {"X-Request: beta"};
     const char* expected_headers[] = {"X-Client: alpha", "Authorization: Bearer token", "X-Request: beta"};
-    g_fake.expected_headers = expected_headers;
-    g_fake.expected_headers_count = 3;
+    g_fake->expected_headers = expected_headers;
+    g_fake->expected_headers_count = 3;
 
     struct stream_capture cap = {0};
     cap.finish_reason = LLM_FINISH_REASON_UNKNOWN;
@@ -1077,8 +867,8 @@ static bool test_contract_completions_streaming_headers(void) {
     const char* prompt = "ping";
     bool ok = llm_completions_stream_with_headers(client, prompt, strlen(prompt), NULL, &callbacks, request_headers, 1);
     if (!require(ok, "llm_completions_stream failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
-    if (!require(g_fake.headers_ok, "headers unstable during completions stream callbacks")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during completions stream callbacks")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
     if (!require(cap.len == 3, "stream content length mismatch")) return false;
     if (!require(memcmp(cap.content, "hi!", 3) == 0, "stream content mismatch")) return false;
@@ -1089,8 +879,8 @@ static bool test_contract_completions_streaming_headers(void) {
 
 static bool test_contract_completions_stream_choice_index(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/completions";
 
     static const char stream_json[] =
         "{\"choices\":[{\"index\":0,\"text\":\"zero\",\"finish_reason\":null},"
@@ -1101,9 +891,9 @@ static bool test_contract_completions_stream_choice_index(void) {
         "{\"index\":1,\"text\":\"one\",\"finish_reason\":\"stop\"}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 32;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 32;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1119,7 +909,7 @@ static bool test_contract_completions_stream_choice_index(void) {
     const char* prompt = "ping";
     bool ok = llm_completions_stream_choice(client, prompt, strlen(prompt), NULL, 1, &callbacks);
     if (!require(ok, "llm_completions_stream_choice failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_STOP, "finish reason mismatch")) return false;
 
     span_t expected = {0};
@@ -1130,14 +920,14 @@ static bool test_contract_completions_stream_choice_index(void) {
     if (!require(memcmp(cap.content, expected.ptr, expected.len) == 0, "stream content mismatch")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during completions stream choice")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during completions stream choice")) return false;
     return true;
 }
 
 static bool test_contract_completions_stream_choice_index_missing(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/completions";
 
     static const char stream_json[] =
         "{\"choices\":[{\"index\":0,\"text\":\"zero\",\"finish_reason\":null},"
@@ -1148,9 +938,9 @@ static bool test_contract_completions_stream_choice_index_missing(void) {
         "{\"index\":1,\"text\":\"one\",\"finish_reason\":\"stop\"}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 32;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 32;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1166,7 +956,7 @@ static bool test_contract_completions_stream_choice_index_missing(void) {
     const char* prompt = "ping";
     bool ok = llm_completions_stream_choice(client, prompt, strlen(prompt), NULL, 2, &callbacks);
     if (!require(ok, "llm_completions_stream_choice failed")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
     if (!require(cap.finish_reason == LLM_FINISH_REASON_UNKNOWN, "finish reason should be unknown")) return false;
     if (!require(cap.len == 0, "missing choice should not emit content")) return false;
 
@@ -1177,19 +967,19 @@ static bool test_contract_completions_stream_choice_index_missing(void) {
     if (!require(expected.len > 0, "completion content should exist")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during completions stream missing choice")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during completions stream missing choice")) return false;
     return true;
 }
 
 static bool test_contract_stream_line_cap_overflow(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/chat/completions";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
 
     static const char stream_sse[] = "data: 123456789";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 5;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 5;
 
     llm_client_t* client = make_client_with_stream_limits("http://fake", 8, 0, 64);
     if (!require(client, "client create failed")) return false;
@@ -1206,19 +996,19 @@ static bool test_contract_stream_line_cap_overflow(void) {
 
     bool ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &callbacks);
     if (!require(!ok, "llm_chat_stream should fail on line cap overflow")) return false;
-    if (!require(g_fake.stream_cb_calls > 0, "stream callback not invoked")) return false;
+    if (!require(g_fake->stream_cb_calls > 0, "stream callback not invoked")) return false;
     if (!require(cap.len == 0, "content should not be produced on overflow")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during line cap overflow")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during line cap overflow")) return false;
     return true;
 }
 
 static bool test_contract_embeddings_request_and_parse(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/embeddings";
-    g_fake.response_post = "{\"data\":[{\"embedding\":[0.1,0.2,0.3]},{\"embedding\":[-1,2]}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/embeddings";
+    g_fake->response_post = "{\"data\":[{\"embedding\":[0.1,0.2,0.3]},{\"embedding\":[-1,2]}]}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1230,28 +1020,28 @@ static bool test_contract_embeddings_request_and_parse(void) {
     llm_embeddings_result_t res = {0};
     bool ok = llm_embeddings(client, inputs, 2, "{\"user\":\"test\"}", &res);
     if (!require(ok, "llm_embeddings failed")) return false;
-    if (!require(res._internal == g_fake.last_body, "response buffer not transferred")) return false;
+    if (!require(res._internal == g_fake->last_body, "response buffer not transferred")) return false;
     if (!require(res.data_count == 2, "expected 2 embeddings")) return false;
 
-    if (!require(g_fake.last_request_body != NULL, "missing request body")) return false;
+    if (!require(g_fake->last_request_body != NULL, "missing request body")) return false;
     span_t model = {0};
-    if (!require(extract_string_field(g_fake.last_request_body, g_fake.last_request_len, "model", &model),
+    if (!require(extract_string_field(g_fake->last_request_body, g_fake->last_request_len, "model", &model),
                  "missing model field"))
         return false;
     if (!require(model.len == 10 && memcmp(model.ptr, "test-model", 10) == 0, "model mismatch")) return false;
 
     span_t user = {0};
-    if (!require(extract_string_field(g_fake.last_request_body, g_fake.last_request_len, "user", &user),
+    if (!require(extract_string_field(g_fake->last_request_body, g_fake->last_request_len, "user", &user),
                  "missing user field"))
         return false;
     if (!require(user.len == 4 && memcmp(user.ptr, "test", 4) == 0, "user mismatch")) return false;
 
     span_t input0 = {0};
     span_t input1 = {0};
-    if (!require(extract_embedding_input_at(g_fake.last_request_body, g_fake.last_request_len, 0, &input0),
+    if (!require(extract_embedding_input_at(g_fake->last_request_body, g_fake->last_request_len, 0, &input0),
                  "missing input[0]"))
         return false;
-    if (!require(extract_embedding_input_at(g_fake.last_request_body, g_fake.last_request_len, 1, &input1),
+    if (!require(extract_embedding_input_at(g_fake->last_request_body, g_fake->last_request_len, 1, &input1),
                  "missing input[1]"))
         return false;
     if (!require(input0.len == inputs[0].text_len, "input[0] length mismatch")) return false;
@@ -1261,10 +1051,10 @@ static bool test_contract_embeddings_request_and_parse(void) {
 
     span_t expected0 = {0};
     span_t expected1 = {0};
-    if (!require(extract_embedding_span_at(g_fake.last_body, g_fake.last_body_len, 0, &expected0),
+    if (!require(extract_embedding_span_at(g_fake->last_body, g_fake->last_body_len, 0, &expected0),
                  "embedding[0] parse failed"))
         return false;
-    if (!require(extract_embedding_span_at(g_fake.last_body, g_fake.last_body_len, 1, &expected1),
+    if (!require(extract_embedding_span_at(g_fake->last_body, g_fake->last_body_len, 1, &expected1),
                  "embedding[1] parse failed"))
         return false;
     if (!require(res.data[0].embedding_len == expected0.len, "embedding[0] length mismatch")) return false;
@@ -1276,15 +1066,15 @@ static bool test_contract_embeddings_request_and_parse(void) {
 
     llm_embeddings_free(&res);
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during embeddings request")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during embeddings request")) return false;
     return true;
 }
 
 static bool test_contract_embeddings_limits(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/embeddings";
-    g_fake.response_post = "{\"data\":[{\"embedding\":[0]}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/embeddings";
+    g_fake->response_post = "{\"data\":[{\"embedding\":[0]}]}";
 
     llm_client_t* client = make_client_with_embedding_limits("http://fake", 8, 1);
     if (!require(client, "client create failed")) return false;
@@ -1296,14 +1086,14 @@ static bool test_contract_embeddings_limits(void) {
     llm_embeddings_result_t res = {0};
     bool ok = llm_embeddings(client, inputs, 2, NULL, &res);
     if (!require(!ok, "llm_embeddings should fail on input count cap")) return false;
-    if (!require(!g_fake.called_post, "transport should not run on input count cap")) return false;
+    if (!require(!g_fake->called_post, "transport should not run on input count cap")) return false;
 
     llm_client_destroy(client);
 
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/embeddings";
-    g_fake.response_post = "{\"data\":[{\"embedding\":[0]}]}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/embeddings";
+    g_fake->response_post = "{\"data\":[{\"embedding\":[0]}]}";
 
     client = make_client_with_embedding_limits("http://fake", 3, 2);
     if (!require(client, "client create failed")) return false;
@@ -1311,7 +1101,7 @@ static bool test_contract_embeddings_limits(void) {
     llm_embedding_input_t long_input = {"alpha", 5};
     ok = llm_embeddings(client, &long_input, 1, NULL, &res);
     if (!require(!ok, "llm_embeddings should fail on input length cap")) return false;
-    if (!require(!g_fake.called_post, "transport should not run on input length cap")) return false;
+    if (!require(!g_fake->called_post, "transport should not run on input length cap")) return false;
 
     llm_client_destroy(client);
     return true;
@@ -1319,21 +1109,21 @@ static bool test_contract_embeddings_limits(void) {
 
 static bool test_contract_proxy_passthrough(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.proxy_ok = true;
-    g_fake.expected_url = "http://fake/health";
-    g_fake.response_get = "{\"ok\":true}";
-    g_fake.expected_proxy_url = "http://proxy.local:8080";
-    g_fake.expected_no_proxy = "127.0.0.1,localhost";
+    g_fake->headers_ok = true;
+    g_fake->proxy_ok = true;
+    g_fake->expected_url = "http://fake/health";
+    g_fake->response_get = "{\"ok\":true}";
+    g_fake->expected_proxy_url = "http://proxy.local:8080";
+    g_fake->expected_no_proxy = "127.0.0.1,localhost";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
-    if (!require(llm_client_set_proxy(client, g_fake.expected_proxy_url), "set proxy failed")) return false;
-    if (!require(llm_client_set_no_proxy(client, g_fake.expected_no_proxy), "set no-proxy failed")) return false;
+    if (!require(llm_client_set_proxy(client, g_fake->expected_proxy_url), "set proxy failed")) return false;
+    if (!require(llm_client_set_no_proxy(client, g_fake->expected_no_proxy), "set no-proxy failed")) return false;
 
     bool ok = llm_health(client);
     if (!require(ok, "llm_health failed")) return false;
-    if (!require(g_fake.proxy_ok, "proxy config not passed through")) return false;
+    if (!require(g_fake->proxy_ok, "proxy config not passed through")) return false;
 
     llm_client_destroy(client);
     return true;
@@ -1341,9 +1131,9 @@ static bool test_contract_proxy_passthrough(void) {
 
 static bool test_contract_failure_propagation(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/props";
-    g_fake.fail_get = true;
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/props";
+    g_fake->fail_get = true;
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1355,8 +1145,8 @@ static bool test_contract_failure_propagation(void) {
     if (!require(json == NULL, "failure should clear body")) return false;
     if (!require(len == 0, "failure should clear length")) return false;
 
-    g_fake.expected_url = "http://fake/v1/chat/completions";
-    g_fake.fail_stream = true;
+    g_fake->expected_url = "http://fake/v1/chat/completions";
+    g_fake->fail_stream = true;
     llm_message_t msg = {0};
     msg.role = LLM_ROLE_USER;
     msg.content = "ping";
@@ -1364,18 +1154,18 @@ static bool test_contract_failure_propagation(void) {
     llm_stream_callbacks_t callbacks = {0};
     ok = llm_chat_stream(client, &msg, 1, NULL, NULL, NULL, &callbacks);
     if (!require(!ok, "llm_chat_stream should fail")) return false;
-    if (!require(g_fake.stream_cb_calls == 0, "stream callback should not run on failure")) return false;
+    if (!require(g_fake->stream_cb_calls == 0, "stream callback should not run on failure")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during failure tests")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during failure tests")) return false;
     return true;
 }
 
 static bool test_contract_header_injection_rejected(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/health";
-    g_fake.response_get = "{\"ok\":true}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/health";
+    g_fake->response_get = "{\"ok\":true}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1383,7 +1173,7 @@ static bool test_contract_header_injection_rejected(void) {
     const char* bad_headers[] = {"X-Test: ok\r\nInjected: nope"};
     bool ok = llm_health_with_headers(client, bad_headers, 1);
     if (!require(!ok, "llm_health_with_headers should reject injected header")) return false;
-    if (!require(!g_fake.called_get, "transport should not run with invalid header")) return false;
+    if (!require(!g_fake->called_get, "transport should not run with invalid header")) return false;
 
     llm_client_destroy(client);
     return true;
@@ -1402,9 +1192,9 @@ static bool test_contract_api_key_injection_rejected(void) {
 
 static bool test_contract_completions_missing_choices(void) {
     fake_reset();
-    g_fake.headers_ok = true;
-    g_fake.expected_url = "http://fake/v1/completions";
-    g_fake.response_post = "{\"error\":{\"message\":\"missing\"}}";
+    g_fake->headers_ok = true;
+    g_fake->expected_url = "http://fake/v1/completions";
+    g_fake->response_post = "{\"error\":{\"message\":\"missing\"}}";
 
     llm_client_t* client = make_client("http://fake", NULL, 0);
     if (!require(client, "client create failed")) return false;
@@ -1418,7 +1208,7 @@ static bool test_contract_completions_missing_choices(void) {
     if (!require(res._internal == NULL, "response buffer should be NULL on failure")) return false;
 
     llm_client_destroy(client);
-    if (!require(g_fake.headers_ok, "headers unstable during completions")) return false;
+    if (!require(g_fake->headers_ok, "headers unstable during completions")) return false;
     return true;
 }
 

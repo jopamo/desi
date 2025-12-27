@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fake_transport.h"
 #include "llm/json_core.h"
 #include "llm/llm.h"
 #include "transport_curl.h"
@@ -15,14 +16,7 @@ static void assert_true(bool cond, const char* msg) {
     }
 }
 
-struct fake_transport {
-    const char* post_responses[2];
-    size_t post_calls;
-    char* request_bodies[2];
-    size_t request_lens[2];
-};
-
-static struct fake_transport g_fake;
+static fake_transport_state_t* g_fake;
 
 struct dispatch_state {
     size_t calls;
@@ -31,105 +25,8 @@ struct dispatch_state {
 };
 
 static void fake_reset(void) {
-    for (size_t i = 0; i < (sizeof(g_fake.request_bodies) / sizeof(g_fake.request_bodies[0])); i++) {
-        free(g_fake.request_bodies[i]);
-    }
-    memset(&g_fake, 0, sizeof(g_fake));
-}
-
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 0;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (body) *body = NULL;
-    if (len) *len = 0;
-    return false;
-}
-
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 200;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-
-    if (g_fake.post_calls >= (sizeof(g_fake.post_responses) / sizeof(g_fake.post_responses[0]))) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-
-    if (json_body) {
-        size_t req_len = strlen(json_body);
-        char* req = malloc(req_len + 1);
-        if (!req) return false;
-        memcpy(req, json_body, req_len);
-        req[req_len] = '\0';
-        g_fake.request_bodies[g_fake.post_calls] = req;
-        g_fake.request_lens[g_fake.post_calls] = req_len;
-    }
-
-    const char* resp = g_fake.post_responses[g_fake.post_calls++];
-    if (!resp) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    size_t resp_len = strlen(resp);
-    char* out = malloc(resp_len + 1);
-    if (!out) return false;
-    memcpy(out, resp, resp_len);
-    out[resp_len] = '\0';
-    if (body) *body = out;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
-                      llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)read_idle_timeout_ms;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    (void)cb;
-    (void)user_data;
-    if (status) {
-        status->http_status = 0;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    return false;
+    fake_transport_reset();
+    g_fake = fake_transport_state();
 }
 
 static bool extract_assistant_tool_call_fields(const char* json, size_t len, span_t* id, span_t* name, span_t* args) {
@@ -278,10 +175,10 @@ static bool dispatch_fixed_reply(void* user_data, const char* tool_name, size_t 
 
 static bool test_tool_loop_includes_tool_calls(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
         "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
-    g_fake.post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
+    g_fake->post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
 
     llm_model_t model = {"test-model"};
     llm_timeout_t timeout = {1000, 2000, 2000};
@@ -299,13 +196,14 @@ static bool test_tool_loop_includes_tool_calls(void) {
 
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, tool_dispatch, NULL, 3);
     assert_true(ok, "tool loop failed");
-    assert_true(g_fake.post_calls == 2, "expected two post calls");
+    assert_true(g_fake->post_calls == 2, "expected two post calls");
 
     span_t id = {0};
     span_t name = {0};
     span_t args = {0};
-    assert_true(extract_assistant_tool_call_fields(g_fake.request_bodies[1], g_fake.request_lens[1], &id, &name, &args),
-                "assistant tool_calls missing from follow-up request");
+    assert_true(
+        extract_assistant_tool_call_fields(g_fake->request_bodies[1], g_fake->request_lens[1], &id, &name, &args),
+        "assistant tool_calls missing from follow-up request");
     assert_true(id.len == 6 && memcmp(id.ptr, "call_1", 6) == 0, "tool id mismatch");
     assert_true(name.len == 3 && memcmp(name.ptr, "add", 3) == 0, "tool name mismatch");
     assert_true(args.len == 2 && memcmp(args.ptr, "42", 2) == 0, "tool args mismatch");
@@ -316,10 +214,10 @@ static bool test_tool_loop_includes_tool_calls(void) {
 
 static bool test_tool_loop_params_passthrough(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
         "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
-    g_fake.post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
+    g_fake->post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
 
     llm_model_t model = {"test-model"};
     llm_timeout_t timeout = {1000, 2000, 2000};
@@ -342,13 +240,13 @@ static bool test_tool_loop_params_passthrough(void) {
     bool ok =
         llm_tool_loop_run(client, &msg, 1, params_json, tooling_json, response_format_json, tool_dispatch, NULL, 3);
     assert_true(ok, "tool loop failed");
-    assert_true(g_fake.post_calls == 2, "expected two post calls");
+    assert_true(g_fake->post_calls == 2, "expected two post calls");
 
-    for (size_t i = 0; i < g_fake.post_calls; i++) {
+    for (size_t i = 0; i < g_fake->post_calls; i++) {
         span_t temperature = {0};
         span_t response_type = {0};
         span_t tool_choice_name = {0};
-        assert_true(extract_request_controls(g_fake.request_bodies[i], g_fake.request_lens[i], &temperature,
+        assert_true(extract_request_controls(g_fake->request_bodies[i], g_fake->request_lens[i], &temperature,
                                              &response_type, &tool_choice_name),
                     "request controls missing");
         assert_true(temperature.len == 3 && memcmp(temperature.ptr, "0.2", 3) == 0, "temperature mismatch");
@@ -364,10 +262,10 @@ static bool test_tool_loop_params_passthrough(void) {
 
 static bool test_tool_loop_detects_repeat(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
         "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
-    g_fake.post_responses[1] =
+    g_fake->post_responses[1] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_2\",\"type\":\"function\",\"function\":{"
         "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
 
@@ -391,11 +289,11 @@ static bool test_tool_loop_detects_repeat(void) {
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 4);
     assert_true(!ok, "expected loop detection failure");
     assert_true(state.calls == 1, "expected single dispatch");
-    assert_true(g_fake.post_calls == 2, "expected two post calls");
+    assert_true(g_fake->post_calls == 2, "expected two post calls");
 
     span_t role = {0};
     span_t content = {0};
-    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+    assert_true(extract_first_message(g_fake->request_bodies[0], g_fake->request_lens[0], &role, &content),
                 "first request message parse failed");
     assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
     assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
@@ -403,8 +301,9 @@ static bool test_tool_loop_detects_repeat(void) {
     span_t id = {0};
     span_t name = {0};
     span_t args = {0};
-    assert_true(extract_assistant_tool_call_fields(g_fake.request_bodies[1], g_fake.request_lens[1], &id, &name, &args),
-                "assistant tool_calls missing from follow-up request");
+    assert_true(
+        extract_assistant_tool_call_fields(g_fake->request_bodies[1], g_fake->request_lens[1], &id, &name, &args),
+        "assistant tool_calls missing from follow-up request");
     assert_true(id.len == 6 && memcmp(id.ptr, "call_1", 6) == 0, "tool id mismatch");
     assert_true(name.len == 3 && memcmp(name.ptr, "add", 3) == 0, "tool name mismatch");
     assert_true(args.len == 2 && memcmp(args.ptr, "42", 2) == 0, "tool args mismatch");
@@ -415,7 +314,7 @@ static bool test_tool_loop_detects_repeat(void) {
 
 static bool test_tool_loop_max_turns(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
         "\"name\":\"add\",\"arguments\":\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
 
@@ -439,11 +338,11 @@ static bool test_tool_loop_max_turns(void) {
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 1);
     assert_true(!ok, "expected max turns failure");
     assert_true(state.calls == 0, "dispatch should not run");
-    assert_true(g_fake.post_calls == 1, "expected one post call");
+    assert_true(g_fake->post_calls == 1, "expected one post call");
 
     span_t role = {0};
     span_t content = {0};
-    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+    assert_true(extract_first_message(g_fake->request_bodies[0], g_fake->request_lens[0], &role, &content),
                 "first request message parse failed");
     assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
     assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
@@ -454,7 +353,7 @@ static bool test_tool_loop_max_turns(void) {
 
 static bool test_tool_loop_args_limit(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":["
         "{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"123\"}},"
         "{\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"sub\",\"arguments\":\"456\"}}"
@@ -482,11 +381,11 @@ static bool test_tool_loop_args_limit(void) {
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 3);
     assert_true(!ok, "expected tool args limit failure");
     assert_true(state.calls == 0, "dispatch should not run");
-    assert_true(g_fake.post_calls == 1, "expected one post call");
+    assert_true(g_fake->post_calls == 1, "expected one post call");
 
     span_t role = {0};
     span_t content = {0};
-    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+    assert_true(extract_first_message(g_fake->request_bodies[0], g_fake->request_lens[0], &role, &content),
                 "first request message parse failed");
     assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
     assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
@@ -497,10 +396,10 @@ static bool test_tool_loop_args_limit(void) {
 
 static bool test_tool_loop_output_limit(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{"
         "\"name\":\"add\",\"arguments\":\"1\"}}]},\"finish_reason\":\"tool_calls\"}]}";
-    g_fake.post_responses[1] =
+    g_fake->post_responses[1] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_2\",\"type\":\"function\",\"function\":{"
         "\"name\":\"sub\",\"arguments\":\"2\"}}]},\"finish_reason\":\"tool_calls\"}]}";
 
@@ -526,11 +425,11 @@ static bool test_tool_loop_output_limit(void) {
     bool ok = llm_tool_loop_run(client, &msg, 1, NULL, tooling_json, NULL, dispatch_fixed_reply, &state, 3);
     assert_true(!ok, "expected tool output limit failure");
     assert_true(state.calls == 2, "expected two dispatch calls");
-    assert_true(g_fake.post_calls == 2, "expected two post calls");
+    assert_true(g_fake->post_calls == 2, "expected two post calls");
 
     span_t role = {0};
     span_t content = {0};
-    assert_true(extract_first_message(g_fake.request_bodies[0], g_fake.request_lens[0], &role, &content),
+    assert_true(extract_first_message(g_fake->request_bodies[0], g_fake->request_lens[0], &role, &content),
                 "first request message parse failed");
     assert_true(role.len == 4 && memcmp(role.ptr, "user", 4) == 0, "role mismatch");
     assert_true(content.len == 8 && memcmp(content.ptr, "run tool", 8) == 0, "content mismatch");
@@ -538,8 +437,9 @@ static bool test_tool_loop_output_limit(void) {
     span_t id = {0};
     span_t name = {0};
     span_t args = {0};
-    assert_true(extract_assistant_tool_call_fields(g_fake.request_bodies[1], g_fake.request_lens[1], &id, &name, &args),
-                "assistant tool_calls missing from follow-up request");
+    assert_true(
+        extract_assistant_tool_call_fields(g_fake->request_bodies[1], g_fake->request_lens[1], &id, &name, &args),
+        "assistant tool_calls missing from follow-up request");
     assert_true(id.len == 6 && memcmp(id.ptr, "call_1", 6) == 0, "tool id mismatch");
     assert_true(name.len == 3 && memcmp(name.ptr, "add", 3) == 0, "tool name mismatch");
     assert_true(args.len == 1 && memcmp(args.ptr, "1", 1) == 0, "tool args mismatch");

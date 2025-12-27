@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fake_transport.h"
 #include "llm/json_core.h"
 #include "llm/llm.h"
 #include "transport_curl.h"
@@ -15,109 +16,11 @@ static void assert_true(bool cond, const char* msg) {
     }
 }
 
-struct fake_transport {
-    const char* stream_payload;
-    size_t stream_payload_len;
-    size_t stream_chunk_size;
-    size_t stream_cb_calls;
-    const char* post_responses[2];
-    size_t post_calls;
-};
+static fake_transport_state_t* g_fake;
 
-static struct fake_transport g_fake;
-
-static void fake_reset(void) { memset(&g_fake, 0, sizeof(g_fake)); }
-
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 0;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (body) *body = NULL;
-    if (len) *len = 0;
-    return false;
-}
-
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 200;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (g_fake.post_calls >= (sizeof(g_fake.post_responses) / sizeof(g_fake.post_responses[0]))) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    const char* resp = g_fake.post_responses[g_fake.post_calls++];
-    if (!resp) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-    size_t resp_len = strlen(resp);
-    char* out = malloc(resp_len + 1);
-    if (!out) return false;
-    memcpy(out, resp, resp_len);
-    out[resp_len] = '\0';
-    if (body) *body = out;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
-                      llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)read_idle_timeout_ms;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 200;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (!g_fake.stream_payload || g_fake.stream_payload_len == 0) return true;
-    size_t chunk_size = g_fake.stream_chunk_size ? g_fake.stream_chunk_size : g_fake.stream_payload_len;
-    size_t offset = 0;
-    while (offset < g_fake.stream_payload_len) {
-        size_t remaining = g_fake.stream_payload_len - offset;
-        size_t take = remaining < chunk_size ? remaining : chunk_size;
-        if (!cb(g_fake.stream_payload + offset, take, user_data)) return false;
-        g_fake.stream_cb_calls++;
-        offset += take;
-    }
-    return true;
+static void fake_reset(void) {
+    fake_transport_reset();
+    g_fake = fake_transport_state();
 }
 
 static bool extract_chat_delta_content(const char* json, size_t len, span_t* out) {
@@ -216,9 +119,9 @@ static bool test_stream_cancel_after_frame(void) {
                      frame1, frame2);
     assert_true(n > 0 && (size_t)n < sizeof(stream_buf), "stream buffer overflow");
 
-    g_fake.stream_payload = stream_buf;
-    g_fake.stream_payload_len = (size_t)n;
-    g_fake.stream_chunk_size = g_fake.stream_payload_len;
+    g_fake->stream_payload = stream_buf;
+    g_fake->stream_payload_len = (size_t)n;
+    g_fake->stream_chunk_size = g_fake->stream_payload_len;
 
     llm_model_t model = {"test-model"};
     llm_timeout_t timeout = {1000, 2000, 2000};
@@ -265,9 +168,9 @@ static bool test_stream_cancel_after_chunk(void) {
     static const char stream_sse[] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_sse;
-    g_fake.stream_payload_len = strlen(stream_sse);
-    g_fake.stream_chunk_size = 5;
+    g_fake->stream_payload = stream_sse;
+    g_fake->stream_payload_len = strlen(stream_sse);
+    g_fake->stream_chunk_size = 5;
 
     llm_model_t model = {"test-model"};
     llm_timeout_t timeout = {1000, 2000, 2000};
@@ -310,7 +213,7 @@ static bool tool_dispatch(void* user_data, const char* tool_name, size_t name_le
     state->args_ok = (name_len == 3 && memcmp(tool_name, "add", 3) == 0);
     if (state->args_ok) {
         span_t expected = {0};
-        const char* resp = g_fake.post_responses[0];
+        const char* resp = g_fake->post_responses[0];
         if (!resp) {
             state->args_ok = false;
         } else if (!extract_tool_args(resp, strlen(resp), &expected)) {
@@ -332,10 +235,10 @@ static bool abort_tool_loop(void* user_data) {
 
 static bool test_tool_loop_cancel_between_turns(void) {
     fake_reset();
-    g_fake.post_responses[0] =
+    g_fake->post_responses[0] =
         "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"add\",\"arguments\":"
         "\"42\"}}]},\"finish_reason\":\"tool_calls\"}]}";
-    g_fake.post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
+    g_fake->post_responses[1] = "{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}";
 
     llm_model_t model = {"test-model"};
     llm_timeout_t timeout = {1000, 2000, 2000};
@@ -357,7 +260,7 @@ static bool test_tool_loop_cancel_between_turns(void) {
     assert_true(err == LLM_ERR_CANCELLED, "expected cancellation between turns");
     assert_true(state.called == 1, "expected one tool dispatch before cancel");
     assert_true(state.args_ok, "tool args parse failed");
-    assert_true(g_fake.post_calls == 1, "expected one post call before cancel");
+    assert_true(g_fake->post_calls == 1, "expected one post call before cancel");
 
     llm_client_destroy(client);
     return true;

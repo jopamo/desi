@@ -7,6 +7,7 @@
 #define JSTOK_HEADER
 #include <jstok.h>
 
+#include "fake_transport.h"
 #include "llm/llm.h"
 #include "transport_curl.h"
 
@@ -18,111 +19,11 @@ static bool require(bool cond, const char* msg) {
     return true;
 }
 
-struct fake_transport_state {
-    const char* response_post;
-    const char* stream_payload;
-    size_t stream_payload_len;
-    size_t stream_chunk_size;
-    bool called_post;
-    bool called_stream;
-};
+static fake_transport_state_t* g_fake;
 
-static struct fake_transport_state g_fake;
-
-static void fake_reset(void) { memset(&g_fake, 0, sizeof(g_fake)); }
-
-bool http_get(const char* url, long timeout_ms, size_t max_response_bytes, const char* const* headers,
-              size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url, const char* no_proxy,
-              char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 0;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-    if (body) *body = NULL;
-    if (len) *len = 0;
-    return false;
-}
-
-bool http_post(const char* url, const char* json_body, long timeout_ms, size_t max_response_bytes,
-               const char* const* headers, size_t headers_count, const llm_tls_config_t* tls, const char* proxy_url,
-               const char* no_proxy, char** body, size_t* len, llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)max_response_bytes;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 200;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-
-    g_fake.called_post = true;
-
-    if (!g_fake.response_post) {
-        if (body) *body = NULL;
-        if (len) *len = 0;
-        if (status) status->http_status = 0;
-        return false;
-    }
-
-    size_t resp_len = strlen(g_fake.response_post);
-    char* resp = malloc(resp_len + 1);
-    if (!resp) return false;
-    memcpy(resp, g_fake.response_post, resp_len);
-    resp[resp_len] = '\0';
-    if (body) *body = resp;
-    if (len) *len = resp_len;
-    return true;
-}
-
-bool http_post_stream(const char* url, const char* json_body, long timeout_ms, long read_idle_timeout_ms,
-                      const char* const* headers, size_t headers_count, const llm_tls_config_t* tls,
-                      const char* proxy_url, const char* no_proxy, stream_cb cb, void* user_data,
-                      llm_transport_status_t* status) {
-    (void)url;
-    (void)json_body;
-    (void)timeout_ms;
-    (void)read_idle_timeout_ms;
-    (void)headers;
-    (void)headers_count;
-    (void)tls;
-    (void)proxy_url;
-    (void)no_proxy;
-    if (status) {
-        status->http_status = 200;
-        status->curl_code = 0;
-        status->tls_error = false;
-    }
-
-    g_fake.called_stream = true;
-    if (!g_fake.stream_payload || g_fake.stream_payload_len == 0) {
-        if (status) status->http_status = 0;
-        return false;
-    }
-
-    size_t chunk_size = g_fake.stream_chunk_size ? g_fake.stream_chunk_size : g_fake.stream_payload_len;
-    size_t offset = 0;
-    while (offset < g_fake.stream_payload_len) {
-        size_t remaining = g_fake.stream_payload_len - offset;
-        size_t take = remaining < chunk_size ? remaining : chunk_size;
-        if (!cb(g_fake.stream_payload + offset, take, user_data)) return false;
-        offset += take;
-    }
-    return true;
+static void fake_reset(void) {
+    fake_transport_reset();
+    g_fake = fake_transport_state();
 }
 
 struct tool_delta_capture {
@@ -374,7 +275,7 @@ int main(void) {
     const char* response_post =
         "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"tool_calls\":[{\"id\":\"call_0\","
         "\"function\":{\"name\":\"ping\",\"arguments\":\"{\\\"a\\\":1,\\\"note\\\":\\\"hi\\\\nthere\\\"}\"}}]}}]}";
-    g_fake.response_post = response_post;
+    g_fake->response_post = response_post;
 
     llm_message_t messages[] = {{LLM_ROLE_USER, "ping", 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0}};
     llm_chat_result_t result;
@@ -382,7 +283,7 @@ int main(void) {
         llm_client_destroy(client);
         return 1;
     }
-    if (!require(g_fake.called_post, "transport not called")) {
+    if (!require(g_fake->called_post, "transport not called")) {
         llm_chat_result_free(&result);
         llm_client_destroy(client);
         return 1;
@@ -461,9 +362,24 @@ int main(void) {
         "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\\nthere\\\"}\"}}]}}]}"
         "\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = stream_payload;
-    g_fake.stream_payload_len = strlen(stream_payload);
-    g_fake.stream_chunk_size = 7;
+    g_fake->stream_payload = stream_payload;
+    g_fake->stream_payload_len = strlen(stream_payload);
+    fake_stream_chunk_t chunks[3];
+    size_t offset = 0;
+    chunks[0].data = stream_payload;
+    chunks[0].len = 5;
+    offset += chunks[0].len;
+    chunks[1].data = stream_payload + offset;
+    chunks[1].len = 7;
+    offset += chunks[1].len;
+    if (!require(g_fake->stream_payload_len > offset, "stream payload too short")) {
+        llm_client_destroy(client);
+        return 1;
+    }
+    chunks[2].data = stream_payload + offset;
+    chunks[2].len = g_fake->stream_payload_len - offset;
+    g_fake->stream_chunks = chunks;
+    g_fake->stream_chunks_count = 3;
 
     struct tool_delta_capture cap = {0};
     llm_stream_callbacks_t cbs = {0};
@@ -477,7 +393,7 @@ int main(void) {
         return 1;
     }
 
-    if (!require(g_fake.called_stream, "stream transport not called")) {
+    if (!require(g_fake->called_stream, "stream transport not called")) {
         llm_client_destroy(client);
         return 1;
     }
@@ -607,9 +523,9 @@ int main(void) {
         "{\"index\":1,\"function\":{\"arguments\":\"}\"}}"
         "]}}]}\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = multi_stream_payload;
-    g_fake.stream_payload_len = strlen(multi_stream_payload);
-    g_fake.stream_chunk_size = 9;
+    g_fake->stream_payload = multi_stream_payload;
+    g_fake->stream_payload_len = strlen(multi_stream_payload);
+    g_fake->stream_chunk_size = 9;
 
     struct tool_multi_capture multi = {0};
     llm_stream_callbacks_t multi_cbs = {0};
@@ -621,7 +537,7 @@ int main(void) {
         llm_client_destroy(client);
         return 1;
     }
-    if (!require(g_fake.called_stream, "stream transport not called (multi)")) {
+    if (!require(g_fake->called_stream, "stream transport not called (multi)")) {
         llm_client_destroy(client);
         return 1;
     }
@@ -717,9 +633,9 @@ int main(void) {
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\","
         "\"function\":{\"name\":\"ping\",\"arguments\":\"{\\\"a\\\":}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
-    g_fake.stream_payload = bad_stream_payload;
-    g_fake.stream_payload_len = strlen(bad_stream_payload);
-    g_fake.stream_chunk_size = 5;
+    g_fake->stream_payload = bad_stream_payload;
+    g_fake->stream_payload_len = strlen(bad_stream_payload);
+    g_fake->stream_chunk_size = 5;
 
     struct tool_delta_capture bad_cap = {0};
     llm_stream_callbacks_t bad_cbs = {0};

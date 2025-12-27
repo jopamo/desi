@@ -121,6 +121,7 @@ if get_option('tests')
 
   test_tool_deltas = executable('test_tool_deltas',
     'tests/test_tool_delta_callbacks.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -131,7 +132,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
@@ -139,6 +140,7 @@ if get_option('tests')
 
   test_stream_usage = executable('test_stream_usage',
     'tests/test_stream_usage.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -149,7 +151,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
@@ -184,6 +186,7 @@ if get_option('tests')
 
   test_transport_contract = executable('test_transport_contract',
     'tests/test_transport_contract.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -194,7 +197,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
@@ -202,6 +205,7 @@ if get_option('tests')
 
   test_error_detail = executable('test_error_detail',
     'tests/test_error_detail.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -212,7 +216,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
@@ -238,6 +242,7 @@ if get_option('tests')
 
   test_last_error = executable('test_last_error',
     'tests/test_last_error.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -248,7 +253,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
@@ -256,6 +261,7 @@ if get_option('tests')
 
   test_cancellation = executable('test_cancellation',
     'tests/test_cancellation.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -266,7 +272,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
@@ -274,6 +280,7 @@ if get_option('tests')
 
   test_tool_loop_requests = executable('test_tool_loop_requests',
     'tests/test_tool_loop_requests.c',
+    'tests/fake_transport.c',
     'src/llm.c',
     'src/jstok_impl.c',
     'src/json_core.c',
@@ -284,7 +291,7 @@ if get_option('tests')
     'src/sse.c',
     'src/tools_accum.c',
     'src/tools_loop.c',
-    include_directories: [inc, include_directories('src')],
+    include_directories: [inc, include_directories('src'), include_directories('tests')],
     dependencies: [jstok_dep],
     install: false,
   )
