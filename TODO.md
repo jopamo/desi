@@ -38,8 +38,12 @@ Phase 1 goal:
 
 ### Tasks
 
+* **Blocked (root cause)**
+  * daemon sources (`desid`, `agentd`, `mcpd`) are not present in the repo, so build targets, layout normalization, and
+    install steps for those daemons cannot be completed yet
+
 * **Define canonical targets**
-  * `libdesi` builds as static + shared
+  * `libdesi` builds as static + shared (done)
   * `desid` builds as a standalone HTTP server
   * `agentd` builds as a standalone HTTP+SSE server
   * `mcpd` builds as standalone tool servers or one toolbox server
@@ -66,7 +70,7 @@ Phase 1 goal:
 
 ### Tasks
 
-* **SSE parser compliance**
+* **SSE parser compliance** (done)
   * implement UTF-8 decode behavior with one leading BOM strip
   * accept CRLF, LF, and CR line endings
   * comment lines beginning with `:` are ignored
@@ -79,7 +83,7 @@ Phase 1 goal:
   * optional comment keepalive emission (`: ping`)
   * enforce max event size and max line size
 
-* **SSE test matrix**
+* **SSE test matrix** (done)
   * line ending variations (CRLF/LF/CR)
   * leading BOM cases
   * empty data dispatch suppression behavior
@@ -88,7 +92,7 @@ Phase 1 goal:
   * `retry` digits-only update behavior
   * huge lines and truncation behavior
   * partial chunk boundaries across every delimiter
-  * compaction correctness (pos and unread bytes)
+  * compaction correctness (pos and unread bytes) (n/a: no compaction in parser)
 
 * **SSE fuzz surfaces**
   * bounded fuzz input for the parser

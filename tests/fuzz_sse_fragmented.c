@@ -13,11 +13,12 @@ struct sse_fuzz_state {
     size_t max_line;
 };
 
-static void on_data_line(void* user_data, span_t line) {
+static bool on_event(void* user_data, const sse_event_t* event) {
     struct sse_fuzz_state* st = user_data;
     st->lines_seen++;
-    st->bytes_seen += line.len;
-    if (line.len > st->max_line) st->max_line = line.len;
+    st->bytes_seen += event->data.len;
+    if (event->data.len > st->max_line) st->max_line = event->data.len;
+    return true;
 }
 
 static bool on_frame(void* user_data) {
@@ -45,7 +46,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (!parser) return 0;
 
     struct sse_fuzz_state st = {0};
-    sse_set_callback(parser, on_data_line, &st);
+    sse_set_callback(parser, on_event, &st);
     sse_set_frame_callback(parser, on_frame, &st);
 
     size_t pos = 0;
@@ -53,7 +54,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         size_t chunk = 1 + (data[pos] % 16);
         if (chunk > size - pos) chunk = size - pos;
         int rc = sse_feed(parser, (const char*)data + pos, chunk);
-        if (rc != SSE_OK || sse_is_done(parser)) break;
+        if (rc != SSE_OK) break;
         pos += chunk;
     }
 

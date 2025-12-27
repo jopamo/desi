@@ -97,5 +97,6 @@ timeout=${FUZZ_TIMEOUT:-5}
 "$build_dir/fuzz_sse_scanner" -dict="$dict_dir/sse.dict" -runs="$runs" -max_len="$max_len" -timeout="$timeout"
 "$build_dir/fuzz_sse_fragmented" -dict="$dict_dir/sse.dict" -runs="$runs" -max_len="$max_len" -timeout="$timeout"
 "$build_dir/fuzz_sse_config" -dict="$dict_dir/sse.dict" -runs="$runs" -max_len="$max_len" -timeout="$timeout"
+"$build_dir/fuzz_sse_writer_roundtrip" -dict="$dict_dir/sse.dict" -runs="$runs" -max_len="$max_len" -timeout="$timeout"
 "$build_dir/fuzz_json_spans" -dict="$dict_dir/json_spans.dict" -runs="$runs" -max_len="$max_len" -timeout="$timeout"
 "$build_dir/fuzz_tool_accum" -dict="$dict_dir/tool_accum.dict" -runs="$runs" -max_len="$max_len" -timeout="$timeout"

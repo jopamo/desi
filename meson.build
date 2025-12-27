@@ -36,12 +36,13 @@ sources = files(
   'src/tools_loop.c',
 )
 
-libdesi = library('desi',
+libdesi = both_libraries('desi',
   sources,
   include_directories: inc,
   dependencies: [curl_dep, jstok_dep],
   install: true,
 )
+libdesi_static = libdesi.get_static_lib()
 
 # Public header
 install_headers('include/llm/llm.h', subdir: 'llm')
@@ -54,6 +55,24 @@ pkg.generate(libdesi,
   version: meson.project_version(),
 )
 
+# Internal HTTP/1 server library and daemons
+inc_internal = include_directories('src/internal')
+lib_internal = static_library('desi_internal',
+  'src/internal/http1_server.c',
+  include_directories: inc_internal,
+  install: false,
+)
+dep_internal = declare_dependency(
+  link_with: lib_internal,
+  include_directories: inc_internal,
+)
+
+if get_option('build_daemons')
+  subdir('src/daemons/desid')
+  subdir('src/daemons/agentd')
+  subdir('src/daemons/mcpd')
+endif
+
 # Tests
 if get_option('tests')
   test_transport = executable('test_transport',
@@ -65,6 +84,12 @@ if get_option('tests')
   )
   test('transport', test_transport)
 
+  test_http1_server = executable('test_http1_server',
+    'tests/test_http1_server.c',
+    install: false,
+  )
+  test('http1_server', test_http1_server)
+
   test_sse_limits = executable('test_sse_limits',
     'tests/test_sse_limits.c',
     include_directories: [inc, include_directories('src')],
@@ -73,6 +98,15 @@ if get_option('tests')
     install: false,
   )
   test('sse_limits', test_sse_limits)
+
+  test_sse_writer = executable('test_sse_writer',
+    'tests/test_sse_writer.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
+  test('sse_writer', test_sse_writer)
 
   test_tls = executable('test_tls',
     'tests/test_tls.c',
@@ -230,6 +264,14 @@ if get_option('tests')
     install: false,
   )
   test('request_opts', test_request_opts)
+  test_request_opts_static = executable('test_request_opts_static',
+    'tests/test_request_opts.c',
+    include_directories: [inc, include_directories('src')],
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi_static,
+    install: false,
+  )
+  test('request_opts_static', test_request_opts_static)
 
   test_errstr = executable('test_errstr',
     'tests/test_errstr.c',
@@ -335,6 +377,16 @@ if get_option('fuzz')
 
   executable('fuzz_sse_config',
     'tests/fuzz_sse_config.c',
+    'src/sse.c',
+    include_directories: fuzz_inc,
+    dependencies: [jstok_dep],
+    c_args: fuzz_cflags,
+    link_args: fuzz_link_args,
+    install: false,
+  )
+
+  executable('fuzz_sse_writer_roundtrip',
+    'tests/fuzz_sse_writer_roundtrip.c',
     'src/sse.c',
     include_directories: fuzz_inc,
     dependencies: [jstok_dep],

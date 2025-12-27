@@ -6,9 +6,10 @@
 
 enum { FUZZ_MAX_INPUT = 8192 };
 
-static void on_data_line(void* user_data, span_t line) {
+static bool on_event(void* user_data, const sse_event_t* event) {
     (void)user_data;
-    (void)line;
+    (void)event;
+    return true;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
@@ -28,7 +29,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     sse_parser_t* parser = sse_create(max_line, max_frame, max_buf, max_total);
     if (!parser) return 0;
-    sse_set_callback(parser, on_data_line, NULL);
+    sse_set_callback(parser, on_event, NULL);
 
     const char* payload = (const char*)data + 4;
     size_t payload_len = size - 4;

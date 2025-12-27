@@ -967,16 +967,23 @@ struct completions_stream_ctx {
     const llm_stream_callbacks_t* callbacks;
     size_t choice_index;
     bool include_usage;
+    bool done;
 };
 
-static void on_sse_completions_data(void* user_data, span_t line) {
+static bool on_sse_completions_event(void* user_data, const sse_event_t* event) {
     struct completions_stream_ctx* ctx = user_data;
+    if (ctx->done) return true;
+    if (event->data.len == 6 && memcmp(event->data.ptr, "[DONE]", 6) == 0) {
+        ctx->done = true;
+        return true;
+    }
+    if (!event->data.ptr || event->data.len == 0) return true;
     span_t text_delta = {0};
     llm_finish_reason_t finish_reason = LLM_FINISH_REASON_UNKNOWN;
     llm_usage_t usage;
     bool usage_present = false;
-    if (parse_completions_chunk_choice(line.ptr, line.len, ctx->choice_index, &text_delta, &finish_reason, &usage,
-                                       &usage_present) == 0) {
+    if (parse_completions_chunk_choice(event->data.ptr, event->data.len, ctx->choice_index, &text_delta, &finish_reason,
+                                       &usage, &usage_present) == 0) {
         if (text_delta.ptr && ctx->callbacks->on_content_delta) {
             ctx->callbacks->on_content_delta(ctx->callbacks->user_data, text_delta.ptr, text_delta.len);
         }
@@ -987,6 +994,7 @@ static void on_sse_completions_data(void* user_data, span_t line) {
             ctx->callbacks->on_finish_reason(ctx->callbacks->user_data, finish_reason);
         }
     }
+    return true;
 }
 
 struct sse_stream_ctx {
@@ -1097,7 +1105,8 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
         return LLM_ERR_FAILED;
     }
 
-    struct completions_stream_ctx ctx = {callbacks, choice_index, include_usage};
+    struct completions_stream_ctx ctx = {
+        .callbacks = callbacks, .choice_index = choice_index, .include_usage = include_usage, .done = false};
     sse_parser_t* sse = sse_create(client->limits.max_line_bytes, client->limits.max_frame_bytes,
                                    client->limits.max_sse_buffer_bytes, client->limits.max_response_bytes);
     if (!sse) {
@@ -1105,7 +1114,7 @@ static llm_error_t llm_completions_stream_with_headers_choice_ex(
         error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
-    sse_set_callback(sse, on_sse_completions_data, &ctx);
+    sse_set_callback(sse, on_sse_completions_event, &ctx);
 
     struct sse_stream_ctx cs = {.sse = sse,
                                 .sse_error = SSE_OK,
@@ -1580,6 +1589,7 @@ struct stream_ctx {
     size_t accums_count;
     size_t max_tool_args;
     bool tool_calls_finalized;
+    bool saw_done;
     bool include_usage;
     bool protocol_error;
     llm_abort_cb abort_cb;
@@ -1648,13 +1658,20 @@ static bool finalize_tool_calls(struct stream_ctx* ctx) {
     return true;
 }
 
-static void on_sse_data(void* user_data, span_t line) {
+static bool on_sse_event(void* user_data, const sse_event_t* event) {
     struct stream_ctx* ctx = user_data;
-    if (ctx->protocol_error) return;
+    if (ctx->protocol_error) return true;
+    if (ctx->saw_done) return true;
+    if (event->data.len == 6 && memcmp(event->data.ptr, "[DONE]", 6) == 0) {
+        ctx->saw_done = true;
+        return true;
+    }
+    if (!event->data.ptr || event->data.len == 0) return true;
     llm_chat_chunk_delta_t delta;
     llm_usage_t usage;
     bool usage_present = false;
-    if (parse_chat_chunk_choice(line.ptr, line.len, ctx->choice_index, &delta, &usage, &usage_present) == 0) {
+    if (parse_chat_chunk_choice(event->data.ptr, event->data.len, ctx->choice_index, &delta, &usage, &usage_present) ==
+        0) {
         if (delta.content_delta && ctx->callbacks->on_content_delta) {
             ctx->callbacks->on_content_delta(ctx->callbacks->user_data, delta.content_delta, delta.content_delta_len);
         }
@@ -1676,7 +1693,7 @@ static void on_sse_data(void* user_data, span_t line) {
                         ctx->protocol_error = true;
                         stream_set_error(ctx, LLM_ERR_FAILED);
                         free(delta.tool_call_deltas);
-                        return;
+                        return true;
                     }
                     ctx->accums = next;
                     for (size_t j = ctx->accums_count; j < new_count; j++) {
@@ -1696,7 +1713,7 @@ static void on_sse_data(void* user_data, span_t line) {
                     ctx->protocol_error = true;
                     stream_set_error(ctx, LLM_ERR_FAILED);
                     free(delta.tool_call_deltas);
-                    return;
+                    return true;
                 }
             }
         }
@@ -1705,7 +1722,7 @@ static void on_sse_data(void* user_data, span_t line) {
                 if (!finalize_tool_calls(ctx)) {
                     ctx->protocol_error = true;
                     free(delta.tool_call_deltas);
-                    return;
+                    return true;
                 }
             }
             if (ctx->callbacks->on_finish_reason) {
@@ -1714,6 +1731,7 @@ static void on_sse_data(void* user_data, span_t line) {
         }
         free(delta.tool_call_deltas);
     }
+    return true;
 }
 
 static bool on_sse_frame_abort_stream(void* user_data) {
@@ -1786,6 +1804,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                              .accums_count = 0,
                              .max_tool_args = client->limits.max_tool_args_bytes_per_call,
                              .tool_calls_finalized = false,
+                             .saw_done = false,
                              .include_usage = include_usage,
                              .protocol_error = false,
                              .abort_cb = abort_cb,
@@ -1798,7 +1817,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
         error_detail_capture(client, detail, LLM_ERR_FAILED, LLM_ERROR_STAGE_PROTOCOL, 0, NULL, 0, false);
         return LLM_ERR_FAILED;
     }
-    sse_set_callback(sse, on_sse_data, &ctx);
+    sse_set_callback(sse, on_sse_event, &ctx);
     sse_set_frame_callback(sse, on_sse_frame_abort_stream, &ctx);
 
     curl_stream_ctx cs = {sse, &ctx, SSE_OK};
@@ -1820,7 +1839,7 @@ static llm_error_t llm_chat_stream_with_headers_choice_ex(llm_client_t* client, 
                                client->timeout.read_idle_timeout_ms, header_set.headers, header_set.count, tls_ptr,
                                client->proxy_url, client->no_proxy, cb, cb_user_data, &status);
     header_set_free(&header_set);
-    if (ok && !ctx.tool_calls_finalized && sse_is_done(sse)) {
+    if (ok && !ctx.tool_calls_finalized && ctx.saw_done) {
         if (!finalize_tool_calls(&ctx)) {
             ctx.protocol_error = true;
             stream_set_error(&ctx, LLM_ERR_FAILED);

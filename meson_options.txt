@@ -1,3 +1,4 @@
 option('tests', type: 'boolean', value: true, description: 'Build tests')
 option('examples', type: 'boolean', value: true, description: 'Build examples')
 option('fuzz', type: 'boolean', value: false, description: 'Build libFuzzer targets')
+option('build_daemons', type: 'boolean', value: true, description: 'Build desid, agentd, and mcpd')
