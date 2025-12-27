@@ -139,9 +139,6 @@ int sse_feed(sse_parser_t* parser, const char* chunk, size_t chunk_len) {
                 payload_len--;
             }
             if (parser->max_frame_bytes) {
-                if (parser->frame_bytes > parser->max_frame_bytes) {
-                    return sse_set_error(parser, SSE_ERR_OVERFLOW_FRAME);
-                }
                 size_t remaining = parser->max_frame_bytes - parser->frame_bytes;
                 if (payload_len > remaining) {
                     return sse_set_error(parser, SSE_ERR_OVERFLOW_FRAME);

@@ -308,6 +308,63 @@ if get_option('tests')
   test('live_llmctl', llmctl, suite: 'live')
 endif
 
+if get_option('fuzz')
+  fuzz_cflags = ['-fsanitize=fuzzer', '-fno-omit-frame-pointer']
+  fuzz_link_args = ['-fsanitize=fuzzer']
+  fuzz_inc = [inc, include_directories('src')]
+
+  executable('fuzz_sse_scanner',
+    'tests/fuzz_sse_scanner.c',
+    'src/sse.c',
+    include_directories: fuzz_inc,
+    dependencies: [jstok_dep],
+    c_args: fuzz_cflags,
+    link_args: fuzz_link_args,
+    install: false,
+  )
+
+  executable('fuzz_sse_fragmented',
+    'tests/fuzz_sse_fragmented.c',
+    'src/sse.c',
+    include_directories: fuzz_inc,
+    dependencies: [jstok_dep],
+    c_args: fuzz_cflags,
+    link_args: fuzz_link_args,
+    install: false,
+  )
+
+  executable('fuzz_sse_config',
+    'tests/fuzz_sse_config.c',
+    'src/sse.c',
+    include_directories: fuzz_inc,
+    dependencies: [jstok_dep],
+    c_args: fuzz_cflags,
+    link_args: fuzz_link_args,
+    install: false,
+  )
+
+  executable('fuzz_json_spans',
+    'tests/fuzz_json_spans.c',
+    'src/jstok_impl.c',
+    'src/json_core.c',
+    include_directories: fuzz_inc,
+    dependencies: [jstok_dep],
+    c_args: fuzz_cflags,
+    link_args: fuzz_link_args,
+    install: false,
+  )
+
+  executable('fuzz_tool_accum',
+    'tests/fuzz_tool_accum.c',
+    'src/tools_accum.c',
+    include_directories: fuzz_inc,
+    dependencies: [jstok_dep],
+    c_args: fuzz_cflags,
+    link_args: fuzz_link_args,
+    install: false,
+  )
+endif
+
 # Examples
 if get_option('examples')
   chat_simple = executable('chat_simple',

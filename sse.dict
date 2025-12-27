@@ -1,0 +1,83 @@
+# ------------------------
+# SSE Protocol Keywords
+# ------------------------
+kw_data="data:"
+kw_id="id:"
+kw_event="event:"
+kw_retry="retry:"
+kw_comment=":"
+kw_done="[DONE]"
+
+# ------------------------
+# Structural / Separators
+# ------------------------
+# SSE is line-based, so newlines are critical for state transitions
+char_lf="\x0A"
+char_cr="\x0D"
+char_crlf="\x0D\x0A"
+char_null="\x00"
+char_space="\x20"
+
+# ------------------------
+# Discovered Binary/Integer Constants
+# ------------------------
+# Derived from your fuzzer logs; likely hitting specific integer/length checks
+# or SIMD vector comparisons.
+
+# 32-bit Integer -1 / UINT_MAX (from log: \377\377\377\377)
+val_neg_1_32="\xFF\xFF\xFF\xFF"
+
+# 64-bit Zero (from log: \000...000)
+val_zero_64="\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# 64-bit Integer 15 (from log: ...\017)
+val_15_64="\x00\x00\x00\x00\x00\x00\x00\x0F"
+
+# 64-bit Integer 24 (from log: ...\030)
+val_24_64="\x00\x00\x00\x00\x00\x00\x00\x18"
+
+# 64-bit Integer 5 (from log: ...\005)
+val_5_64="\x00\x00\x00\x00\x00\x00\x00\x05"
+
+# ------------------------
+# Tricky Sequences
+# ------------------------
+# Likely used to test end-of-buffer or split-page logic
+seq_nulls="\x00\x00"
+seq_ffff="\xFF\xFF"
+
+# ------------------------
+# NEW: Integer Edge Cases (Deep Fuzzing)
+# ------------------------
+# The fuzzer found these specific values caused new code paths.
+# They likely correspond to buffer size checks, length limits, or offsets.
+
+# 64-bit Integer 11 (from log: ...\013)
+val_11_64="\x00\x00\x00\x00\x00\x00\x00\x0B"
+
+# 64-bit Integer 14 (from log: ...\016)
+val_14_64="\x00\x00\x00\x00\x00\x00\x00\x0E"
+
+# 64-bit Integer 19 (from log: \000\023 - technically 19 in hex is 0x13, but check your endianness)
+val_19_64="\x00\x00\x00\x00\x00\x00\x00\x13"
+
+# 32-bit Integer 197 (from log: ...\305)
+val_197_32="\x00\x00\x00\xC5"
+
+# 32-bit Integer 67 (from log: C\000\366... context dependent)
+val_67_32="\x00\x00\x00\x43"
+
+# Max 64-bit Unsigned / -1 Signed (from log: \377\377\377\377\377\377\377\377)
+val_max_64="\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"
+
+# Max 64-bit Signed / Large Positive (from log: \377\377\377\177 - ends in 0x7F)
+val_max_signed_64="\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x7F"
+
+# ------------------------
+# Suspicious Separators
+# ------------------------
+# A colon followed by 32-bit null. Likely testing header parser safety.
+seq_colon_nulls=":\x00\x00\x00\x00"
+
+# A null followed by C (0x43).
+seq_null_C="\x00\x43"
