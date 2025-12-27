@@ -89,16 +89,22 @@ static bool apply_tls_config(CURL* curl, const llm_tls_config_t* tls, char* key_
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_host ? 2L : 0L);
 
     const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
-    if (ca_bundle_path) {
+    bool have_ca_bundle = ca_bundle_path && ca_bundle_path[0];
+    bool have_ca_dir = ca_dir_path && ca_dir_path[0];
+    if (have_ca_bundle) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle_path);
-    } else if (info && info->cainfo && info->cainfo[0]) {
+    } else if (!have_ca_dir && info && info->cainfo && info->cainfo[0]) {
         curl_easy_setopt(curl, CURLOPT_CAINFO, info->cainfo);
+    } else if (have_ca_dir) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, NULL);
     }
 
-    if (ca_dir_path) {
+    if (have_ca_dir) {
         curl_easy_setopt(curl, CURLOPT_CAPATH, ca_dir_path);
-    } else if (info && info->capath && info->capath[0]) {
+    } else if (!have_ca_bundle && info && info->capath && info->capath[0]) {
         curl_easy_setopt(curl, CURLOPT_CAPATH, info->capath);
+    } else if (have_ca_bundle) {
+        curl_easy_setopt(curl, CURLOPT_CAPATH, NULL);
     }
 
     if (client_cert_path) {
