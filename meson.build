@@ -381,6 +381,13 @@ if get_option('examples')
     link_with: libdesi,
     install: false,
   )
+  chat_advanced = executable('chat_advanced',
+    'examples/chat_advanced.c',
+    include_directories: inc,
+    dependencies: [curl_dep, jstok_dep],
+    link_with: libdesi,
+    install: false,
+  )
   tool_loop = executable('tool_loop',
     'examples/tool_loop.c',
     include_directories: inc,

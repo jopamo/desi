@@ -10,24 +10,30 @@ This file describes **data structures, ownership, and control flow**, not usage.
 
 ## Where `desi` Fits
 
-`desi` is a **strict HTTP + TLS client and protocol binding layer**.
+`desi` is a **strict C foundation for LAN agent systems** made of:
 
-In the larger system:
+* **`libdesi`**: HTTP(S) client + TLS/mTLS + SSE framing + zero-DOM JSON + explicit protocol bindings
+* **`desid`**: an HTTP gateway daemon that talks to LLM backends using `libdesi`
+* **`agentd`**: an orchestrator daemon that runs bounded agent state machines and streams run events over SSE
+* **`mcpd`**: tool server daemons that expose explicit capabilities over HTTP
+
+In the larger system, ET can later front these components, but ET is not required for correctness inside this repo
 
 ```
 
 ET (identity, authorization, audit, policy)
-└── uses desi for outbound HTTP(S)
-├── llama-server (stateless inference appliance)
-├── registries
-├── internal APIs
-└── MCP servers
-
-desi = transport contracts + bounded parsing + explicit protocol semantics
+└── fronts agentd/desid
+├── agentd (runs + tool coordination)
+├── desid  (LLM gateway)
+└── mcpd-* (tool servers)
+|
+└── libdesi (transport + SSE + jstok parsing)
 
 ```
 
-`desi` participates in **authentication** (TLS verification, optional mTLS by explicit config) but never **authorization**.
+**Hard invariant:** only `desid` is permitted to connect to LLM backends
+
+`desi` participates in **authentication** (TLS verification, optional mTLS by explicit config) but never **authorization**
 
 `desi` must remain:
 
@@ -43,52 +49,72 @@ desi = transport contracts + bounded parsing + explicit protocol semantics
 
 This design covers:
 
-* Core client data structures
-* Streaming and SSE state
-* Tool-call accumulation
-* JSON read/write boundaries
-* Protocol state machines
-* MCP server mapping
+* Core library contracts and data structures (`libdesi`)
+* SSE parsing and emission rules
+* JSON read/write boundaries (zero DOM)
+* LLM protocol bindings as mechanical state machines
+* `desid` gateway responsibilities and control flow
+* `agentd` run/step model and SSE event stream
+* `mcpd` tool server mapping and boundaries
 
 It intentionally does not describe:
 
 * CLI UX
-* Configuration formats
-* Build system details
-* Transport internals beyond contracts
-* Authorization, rate limiting, or orchestration
+* configuration formats
+* build system details
+* transport internals beyond contracts
+* authorization, rate limiting, or fleet policy (ET territory)
 
 ---
 
-## High-Level Data Flow
+## High-Level Data Flows
+
+### LLM call path
 
 ```
 
-HTTP bytes
+HTTP request to desid
 ↓
-SSE buffer (framing only)
+protocol binding (request validation + construction)
 ↓
-jstok_sse_next (frame boundaries)
+transport (HTTP/TLS byte pump)
+↓
+SSE framing (if streaming)
 ↓
 JSON tokenization (jstok)
 ↓
-Typed extraction helpers (spans, no allocation)
+typed extraction helpers (spans, no allocation)
 ↓
-Protocol state machine (explicit)
+protocol state machine (explicit)
 ↓
-User callbacks / MCP responses
+HTTP response from desid (JSON or SSE)
+
+```
+
+### Orchestration path
+
+```
+
+HTTP request to agentd
+↓
+run state machine (bounded steps)
+↓
+step executes:
+
+* LLM step: agentd → desid
+* tool step: agentd → mcpd-*
+  ↓
+  agentd emits run events as SSE
 
 ````
 
-No stage mutates data owned by another stage.
-
-All non-trivial behavior lives in the protocol layer, not transport or parsing.
+No stage mutates data owned by another stage
 
 ---
 
 ## Core Contracts
 
-### Transport Contract
+### Transport Contract (libdesi)
 
 Transport provides:
 
@@ -101,41 +127,65 @@ Transport provides:
 Transport must not:
 
 * parse JSON
-* interpret SSE
+* interpret SSE semantics
 * retry implicitly
 * mutate request bodies
 * assume server correctness
 
-Transport is a byte pump with metadata.
+Transport is a byte pump with metadata
 
 ---
 
-### Parsing Contract
+### SSE Contract (libdesi)
+
+SSE provides:
+
+* UTF-8 decode and one leading BOM strip
+* line splitting using CRLF, LF, or CR
+* event framing into:
+  - data buffer
+  - event type buffer
+  - last event id buffer
+  - reconnection time (retry)
+* dispatch on blank lines only
+
+SSE must not:
+
+* parse JSON semantics
+* interpret protocol markers like `[DONE]`
+* allocate implicitly
+* lose unread bytes during compaction
+
+SSE is framing only
+
+---
+
+### Parsing Contract (libdesi)
 
 Parsing provides:
 
-* SSE frame boundaries
 * JSON tokenization
 * span-based extraction helpers
+* fragment validation (tool args and similar payloads)
 
 Parsing must not:
 
 * allocate implicitly
 * enforce protocol decisions
-* cache
+* cache cross-request state
 * infer schemas
 * hide errors
 
 ---
 
-### Protocol Contract
+### Protocol Contract (libdesi)
 
 Protocol provides:
 
 * request construction
 * response interpretation
-* tool loop coordination
-* explicit validation of “what matters”
+* explicit validation of what matters
+* streaming state machines
 
 Protocol must not:
 
@@ -143,14 +193,62 @@ Protocol must not:
 * assume server correctness
 * grow hidden background state
 * become a policy engine
+* execute tools
 
 ---
 
-## Core Types
+### Daemon Contracts
+
+#### desid contract
+
+desid provides:
+
+* a stable HTTP API for LLM calls
+* optional SSE streaming responses
+* mechanical limits applied consistently
+* error surfaces that preserve stage
+
+desid must not:
+
+* execute tool loops
+* decide tool policy
+* interpret tool output beyond protocol requirements
+* call other services behind callers’ backs
+
+#### agentd contract
+
+agentd provides:
+
+* run lifecycle management
+* explicit bounded step machine
+* tool coordination and loop limits
+* run event stream as SSE
+
+agentd must not:
+
+* talk to LLM backends directly
+* embed LLM credentials or backend addresses
+* hide failure via implicit retries
+
+#### mcpd contract
+
+mcpd provides:
+
+* explicit tools exposed over HTTP
+* deterministic bounded outputs
+
+mcpd must not:
+
+* talk to LLM backends
+* contain orchestration logic
+
+---
+
+## Core Types (libdesi)
 
 ### llm_client_t
 
-The client is **configuration + backend handle**.
+Configuration + backend handle
 
 ```c
 typedef struct {
@@ -180,13 +278,13 @@ Rules:
 * thread safety is caller-managed
 * all limits are explicit and enforced consistently
 
-`desi` must not store per-request state inside the client.
+libdesi must not store per-request state inside the client
 
 ---
 
 ### llm_request_t
 
-Internal, stack-constructed description of a request.
+Internal, stack-constructed request description
 
 ```c
 typedef struct {
@@ -210,7 +308,7 @@ Rules:
 
 ### llm_response_t
 
-Represents a single HTTP response, streamed or not.
+Represents a single HTTP response, streamed or not
 
 ```c
 typedef struct {
@@ -237,7 +335,7 @@ Rules:
 
 ### llm_json_writer_t
 
-Append-only JSON builder.
+Append-only JSON builder
 
 ```c
 typedef struct {
@@ -257,7 +355,7 @@ Rules:
 * writer never validates output beyond mechanical escaping
 * writer output must be deterministic for equivalent inputs
 
-Writer API must make allocation behavior obvious.
+Writer APIs must make allocation behavior obvious
 
 ---
 
@@ -265,7 +363,7 @@ Writer API must make allocation behavior obvious.
 
 ### llm_json_view_t
 
-A parsed JSON view over an immutable buffer.
+A parsed JSON view over an immutable buffer
 
 ```c
 typedef struct {
@@ -310,11 +408,11 @@ Rules:
 
 ---
 
-## Streaming Structures
+## Streaming Structures (libdesi)
 
 ### llm_sse_buffer_t
 
-Stateful accumulator for streaming responses.
+Stateful accumulator for streaming responses
 
 ```c
 typedef struct {
@@ -329,18 +427,42 @@ typedef struct {
 Rules:
 
 * buffer remains stable between calls
-* `pos` is the read cursor for `jstok_sse_next`
+* `pos` is the read cursor for SSE parsing
 * compaction preserves unread bytes
 * growth is bounded by `client->max_sse_buffer_bytes`
 * the SSE layer does framing only
 
-The SSE layer must never parse JSON semantics.
+The SSE layer must never parse JSON semantics
+
+---
+
+### llm_sse_event_t
+
+A framed SSE event ready for higher-layer interpretation
+
+```c
+typedef struct {
+    llm_span_t event_type;   /* empty means "message" */
+    llm_span_t data;         /* data buffer after trailing LF removal */
+    llm_span_t last_event_id;/* last id seen, may be empty */
+} llm_sse_event_t;
+```
+
+Rules:
+
+* spans are views into the SSE parser’s stable buffers for the lifetime of the callback
+* data must be produced by the SSE rules:
+
+  * `data:` lines append value + LF
+  * trailing LF removed before dispatch
+  * dispatch on blank line only
+* if data is empty, dispatch is suppressed and buffers reset
 
 ---
 
 ### llm_stream_state_t
 
-Per-request streaming state.
+Per-request streaming state for LLM responses
 
 ```c
 typedef struct {
@@ -361,15 +483,15 @@ Rules:
 * no global reuse
 * no hidden global buffers
 
-If tool accumulation is disabled, `tools` is NULL and `tool_count` is 0.
+If tool accumulation is disabled, `tools` is NULL and `tool_count` is 0
 
 ---
 
-## Tool Accumulation
+## Tool Accumulation (libdesi)
 
 ### llm_tool_accumulator_t
 
-Accumulates one tool call across streamed chunks.
+Accumulates one tool call across streamed chunks
 
 ```c
 typedef struct {
@@ -393,15 +515,15 @@ Rules:
 * accumulation is bounded by an explicit max args size
 * ordering is defined by stream index, not arrival timing
 
-Tool args are opaque to `desi` beyond JSON validity.
+Tool args are opaque to libdesi beyond JSON validity
 
 ---
 
-## Protocol-Level Structures
+## Protocol-Level Structures (libdesi)
 
 ### llm_message_t
 
-Chat message provided by the caller.
+Chat message provided by the caller
 
 ```c
 typedef struct {
@@ -423,7 +545,7 @@ Rules:
 
 ### llm_tool_t
 
-Tool definition passed to the protocol layer.
+Tool definition passed to the protocol layer
 
 ```c
 typedef struct {
@@ -438,72 +560,130 @@ Rules:
 * description is mandatory
 * parameters must be valid JSON
 * no schema inference performed
-* `desi` never executes tools, it only coordinates the loop
+* libdesi never executes tools
 
 ---
 
-## Tool Loop State
+## Orchestration Structures (agentd)
+
+agentd owns orchestration state and does not belong in libdesi
+
+### agent_run_t
+
+A run is a bounded state machine with an append-only event log
 
 ```c
 typedef struct {
-    llm_message_t* messages;
-    size_t message_count;
+    uint64_t run_id;
 
-    size_t turns;
-    uint64_t recent_hashes[8];
-} llm_tool_loop_t;
+    uint32_t max_steps;
+    uint32_t max_tool_calls;
+    uint32_t timeout_ms;
+
+    uint32_t step_index;
+    uint32_t tool_calls_used;
+
+    bool cancelled;
+    bool done;
+    int  last_error;
+
+    /* opaque caller payloads, stored explicitly if enabled */
+    void* user;
+} agent_run_t;
 ```
 
 Rules:
 
-* bounded number of turns
-* loop detection via rolling hash
-* messages grow monotonically
-* tool results appended explicitly by the caller
-* tool loop is never implicit
+* all counters are bounded and checked before every step transition
+* no implicit retries
+* determinism is defined by:
 
-`desi` may provide helpers for loop coordination but never hides execution.
+  * same inputs
+  * same tool outputs
+  * same model outputs
+    producing the same state transitions
 
----
+### agent_event_t
 
-## MCP Server Mapping
+Events are what SSE transports
 
-The MCP server is a thin adapter.
-
-Mapping rules:
-
-| MCP concept | desi equivalent |
-| ----------- | --------------- |
-| tool call   | llm_tool_t      |
-| message     | llm_message_t   |
-| stream      | llm_stream_*    |
+```c
+typedef struct {
+    const char* type;     /* "run.started", "step.started", "tool.completed", ... */
+    const char* json;     /* serialized JSON payload */
+    size_t json_len;
+} agent_event_t;
+```
 
 Rules:
 
-* no duplicate parsing
-* no parallel protocol logic
-* MCP errors map directly to llm errors
-* streaming remains streaming
-* MCP must not add convenience behaviors that change semantics
+* SSE emits events with `event:` set to `type` and `data:` carrying `json`
+* event emission is ordered and append-only
+* clients must be able to reconstruct progress from the stream alone
 
-If MCP behavior differs from library behavior, that is a bug.
+agentd uses SSE framing rules identical to libdesi SSE writer rules
+
+---
+
+## Tool Server Structures (mcpd)
+
+mcpd is a tool capability server and does not include orchestration
+
+### mcp_tool_t
+
+```c
+typedef struct {
+    const char* name;
+    const char* description;
+    const char* input_schema_json;
+} mcp_tool_t;
+```
+
+Rules:
+
+* input schema JSON must be valid JSON
+* tool outputs are bounded and deterministic
+* mcpd must never call LLMs
+
+---
+
+## HTTP Surface Summary
+
+### desid
+
+* accepts LLM calls over HTTP
+* streams responses using SSE for streaming calls
+* is the only component that talks to LLM backends
+
+### agentd
+
+* accepts run creation and control
+* emits run events as SSE
+* calls desid and mcpd as needed
+
+### mcpd
+
+* exposes tools over HTTP
+* returns bounded results
 
 ---
 
 ## Ownership Summary
 
-| Resource         | Owner        |
-| ---------------- | ------------ |
-| HTTP buffers     | transport    |
-| response headers | transport    |
-| JSON tokens      | json view    |
-| spans            | non-owning   |
-| stream buffers   | stream state |
-| tool args buf    | accumulator  |
-| messages         | caller       |
-| client config    | caller       |
+| Resource         | Owner                        |
+| ---------------- | ---------------------------- |
+| HTTP buffers     | transport or request context |
+| response headers | transport                    |
+| JSON tokens      | json view                    |
+| spans            | non-owning                   |
+| stream buffers   | stream state                 |
+| tool args buf    | accumulator                  |
+| messages         | caller                       |
+| client config    | caller                       |
+| run state        | agentd                       |
+| tool state       | mcpd                         |
 
-Violating ownership rules is a correctness bug.
+Violating ownership rules is a correctness bug
 
 ---
 
@@ -511,10 +691,11 @@ Violating ownership rules is a correctness bug.
 
 These must always hold:
 
+* only desid reaches LLM backends
 * no hidden allocation
 * no token survives its buffer
 * no tool executes implicitly
-* no stream parses incomplete JSON
+* no stream dispatches incomplete events
 * no protocol logic in transport
 * no SSE semantics beyond framing
 * all limits are enforced mechanically and consistently
@@ -524,7 +705,7 @@ These must always hold:
 
 ## Final Statement
 
-`desi` is intentionally strict.
+`desi` is intentionally strict
 
 It prefers:
 
@@ -533,4 +714,4 @@ It prefers:
 * boring control flow
 * mechanical limits over “smart” behavior
 
-Any design change that weakens these properties is unacceptable.
+Any design change that weakens these properties is unacceptable

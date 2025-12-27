@@ -8,32 +8,28 @@ If behavior in code diverges from what is described here, **the code is wrong**.
 
 ## What `desi` Is
 
-`desi` is a **strict, low-level HTTP + TLS client and protocol binding layer** for talking to LLM-style APIs (and similar structured HTTP services).
+`desi` is a **strict, low-level C foundation for LAN agent systems**, centered on:
 
-In the larger system:
+* **`libdesi`**: HTTP(S) client + TLS/mTLS plumbing + SSE framing + zero-DOM JSON + LLM protocol bindings
+* **`desid`**: an HTTP gateway daemon that talks to LLM backends using `libdesi`
+* **`agentd`**: an orchestration daemon that runs bounded agent state machines and streams run events
+* **`mcpd`**: tool server daemons that expose explicit capabilities over HTTP
 
-```
+In the larger system, **ET** can later front these, but it is not required for correctness inside this repo.
 
-ET (identity, authorization, audit, policy)
-└── uses desi for outbound HTTP(S) calls
-├── llama-server (stateless inference appliance)
-├── registries
-├── internal APIs
-└── MCP servers
+---
 
-desi = transport + parsing + protocol semantics
+## The LLM Boundary
 
-```
+This is the most important architectural invariant in the repository
 
-`desi` exists so higher layers can be correct without re-implementing:
+**Only `desid` is permitted to connect to LLM backends**
 
-* TLS verification and client cert handling
-* bounded streaming
-* deterministic JSON emission
-* zero-DOM JSON extraction
-* explicit protocol state machines
+* `llama-server` and other LLM endpoints must not be reachable directly by `agentd`, `mcpd`, or LAN clients
+* `agentd` obtains model outputs by calling `desid`
+* `mcpd` implements tools and must never call an LLM
 
-`desi` is intentionally small, explicit, and hostile to abstraction creep.
+This is enforced by deployment topology and must remain true in code as well
 
 ---
 
@@ -43,20 +39,20 @@ desi = transport + parsing + protocol semantics
 
 * an authorization system
 * a device identity manager
-* a task executor
-* a retry/orchestration engine
+* a general scheduler
 * a cache
-* a scheduler
-* an agent framework
 * a convenience wrapper that hides failure
+* a DOM-based JSON runtime
+* a “do everything” agent framework inside `libdesi`
 
-Those belong elsewhere:
+Separation of concerns:
 
-* **ET** handles identity, authorization, audit, and fleet policy
-* **llama-server** handles inference only
-* **callers** decide intent, retries, and policy
+* `desid` is the only LLM gateway
+* `agentd` orchestrates runs and tool loops
+* `mcpd` provides tools
+* ET (when present) owns identity, authorization, audit, and fleet policy
 
-If a feature needs cross-request memory, implicit behavior, or policy interpretation, it does not belong in `desi`.
+If a feature needs implicit behavior, cross-request memory, or policy interpretation, it does not belong in `libdesi`
 
 ---
 
@@ -71,22 +67,22 @@ Design principles:
 * **No magic retries**
 * **No guessing**
 
-Every byte, token, and buffer must be explainable.
+Every byte, token, and buffer must be explainable
 
 ---
 
 ## Trust and PKI Boundary
 
-`desi` participates in **authentication**, not **authorization**.
+`libdesi` and `desid` participate in **authentication**, not **authorization**
 
 Rules:
 
 * TLS verification is always on by default
 * the system CA store is used by default
-* mTLS (client certs) is supported only by explicit caller configuration
-* `desi` never decides who is allowed to call what
+* mTLS is supported only by explicit configuration
+* neither `libdesi` nor `desid` decides who is allowed to call what
 
-`desi` may enforce mechanical constraints:
+`libdesi` and `desid` may enforce mechanical constraints:
 
 * size limits
 * timeouts
@@ -94,23 +90,23 @@ Rules:
 * redirect limits
 * strict parsing and framing rules
 
-But it must not encode policy decisions.
+But they must not encode policy decisions
 
 ---
 
 ## Architectural Invariants
 
-These rules are non-negotiable.
+These rules are non-negotiable
 
 ### Zero-DOM JSON
 
-`desi` does not build a JSON object graph.
+`libdesi` does not build a JSON object graph
 
 * tokenization and extraction only
 * spans into caller-owned buffers
 * explicit copying only
 
-If you find yourself wanting a DOM, stop.
+If you find yourself wanting a DOM, stop
 
 ---
 
@@ -121,7 +117,8 @@ If you find yourself wanting a DOM, stop.
 * tokenization
 * validation
 * path-based extraction
-* SSE `data:` frame scanning
+* validating JSON fragments (including streamed tool argument fragments)
+* scanning SSE payload boundaries when needed
 
 `jstok` must never be used for:
 
@@ -131,7 +128,7 @@ If you find yourself wanting a DOM, stop.
 * schema enforcement beyond local validation
 * caching or memoization
 
-`jstok` is a tokenizer, not a runtime.
+`jstok` is a tokenizer, not a runtime
 
 ---
 
@@ -139,31 +136,31 @@ If you find yourself wanting a DOM, stop.
 
 By default:
 
-* input JSON buffers are owned by the caller or transport
-* all extracted values are **spans** into those buffers
-* copying is always explicit and opt-in
+* input buffers are owned by the caller or request context
+* extracted values are spans into those buffers
+* copying is explicit and opt-in
 
 Rules:
 
 * no implicit `malloc`
 * no internal global allocators
-* no long-lived heap state
+* no long-lived heap state in hot paths
 * streaming buffers must be compacted, not reallocated repeatedly
 
-If a function allocates, it must be obvious from the API name and signature.
+If a function allocates, it must be obvious from the API name and signature
 
 ---
 
 ### Error Handling
 
-Errors are values, not logs.
+Errors are values, not logs
 
 Rules:
 
 * every public API returns an error code
 * error enums are stable and documented
+* errors preserve the failing stage (transport vs tls vs sse vs parse vs protocol)
 * partial success is not allowed unless explicitly designed
-* errors must preserve the stage of failure (transport vs parse vs protocol)
 
 Never swallow errors from:
 
@@ -177,13 +174,13 @@ Never swallow errors from:
 
 ## Layer Responsibilities
 
-`desi` is a set of tight layers with sharp boundaries.
+`libdesi` is a set of tight layers with sharp boundaries
 
 ### Transport Layer
 
 Files:
 
-* `llm_transport_*.c`
+* `llm_transport_*.c` (or `desi_transport_*.c`)
 
 Responsibilities:
 
@@ -196,12 +193,12 @@ Responsibilities:
 Must not:
 
 * parse JSON
-* interpret SSE
+* interpret SSE semantics
 * retry implicitly
 * mutate request bodies
-* infer content types or semantics
+* infer content types or protocol meaning
 
-The transport is dumb by design.
+The transport is a byte pump by design
 
 ---
 
@@ -224,7 +221,7 @@ Rules:
 * no pretty printing
 * no dynamic structure inference
 
-If the writer fails, it fails immediately.
+If the writer fails, it fails immediately
 
 ---
 
@@ -248,7 +245,7 @@ Rules:
 * missing required fields are errors
 * bounds checks are mandatory
 
-All helpers must be test-covered.
+All helpers must be test-covered
 
 ---
 
@@ -261,22 +258,30 @@ Files:
 Responsibilities:
 
 * buffering arbitrary byte chunks
-* scanning complete `data:` frames
-* handing JSON payloads to the parser
+* parsing SSE framing into events
+* yielding complete `data` payloads to higher layers
 
 Rules:
 
-* buffer must remain stable across partial parses
-* `jstok_sse_next()` position must be respected
-* compaction must preserve unread bytes
-* `[DONE]` is a protocol signal, not JSON
 * SSE parsing is framing only, not semantics
+* buffer must remain stable across partial parses
+* compaction must preserve unread bytes
+* no recursion in hot paths
 
-No recursion in hot paths.
+SSE framing must follow the EventSource processing rules:
+
+* UTF-8 decode, strip one leading BOM if present
+* accept CRLF, LF, or CR line endings
+* ignore comment lines beginning with `:`
+* handle `event`, `data`, `id`, `retry` fields as specified
+* dispatch only on blank lines
+* discard incomplete trailing events at EOF
+
+Do not implement ad-hoc SSE parsers outside the SSE module
 
 ---
 
-### Protocol Semantics
+### LLM Protocol Bindings
 
 Files:
 
@@ -288,19 +293,82 @@ Responsibilities:
 
 * request construction
 * response interpretation
-* tool loop execution
-* finish_reason handling
 * explicit state machines and validation
+* assembling fragmented tool-call arguments when the upstream streams them
 
 Rules:
 
 * never assume server correctness
 * validate everything that matters
 * keep state machines explicit
-* tool loops must be bounded
 * treat all remote strings as untrusted input
 
-Protocol logic belongs here and nowhere else.
+`libdesi` may decode and assemble tool-call arguments, but it must not decide tool policy or execute tools
+
+---
+
+## Daemon Responsibilities
+
+The daemons are thin and must not fork the core library logic
+
+### `desid` (LLM gateway)
+
+Responsibilities:
+
+* expose an HTTP API for LLM calls
+* call `libdesi` for outbound LLM HTTP(S)
+* preserve streaming end-to-end
+* enforce mechanical limits (timeouts, byte caps, redirect caps)
+
+Must not:
+
+* execute tool loops
+* implement orchestration policy
+* reinterpret tool output
+* hide failures
+
+If `desid` behavior differs from `libdesi` semantics, that is a bug
+
+---
+
+### `agentd` (orchestrator)
+
+Responsibilities:
+
+* run lifecycle (create, status, cancel)
+* explicit bounded step machine
+* tool coordination and loop limits
+* run event stream as SSE
+
+Rules:
+
+* tool execution is caller-controlled and bounded
+* loop detection must exist
+* all steps must be observable as events
+* orchestration must be deterministic given the same inputs
+
+Must not:
+
+* talk to LLM backends directly
+* embed LLM credentials or backend addresses
+* hide failures through implicit retries
+
+---
+
+### `mcpd` (tool servers)
+
+Responsibilities:
+
+* expose tools as explicit capabilities over HTTP
+* validate and bound inputs
+* return deterministic, size-limited outputs
+
+Rules:
+
+* tools never talk to LLM backends
+* tool servers must be hostile-input safe
+* no unbounded caches
+* no implicit orchestration behavior
 
 ---
 
@@ -312,40 +380,18 @@ Tool execution must be:
 * bounded
 * observable
 
+Policy lives in `agentd`
+
 Rules:
 
 * tools must have descriptions
 * tool arguments must be valid JSON
 * fragmented arguments must be accumulated verbatim
-* loop detection must exist
-* tool output is opaque to the client
-* the caller must opt in to running tools
+* loop detection and maximum iterations must exist
+* tool output is opaque data to the model
+* tool execution must be explicitly enabled per run
 
-Never auto-execute tools without caller involvement.
-
----
-
-## MCP Server Rules
-
-Files:
-
-* `mcp_server.c`
-
-The MCP server:
-
-* wraps the same core APIs
-* does not fork logic
-* does not add parsing layers
-* does not reinterpret responses
-
-Rules:
-
-* MCP messages map 1:1 to core calls
-* errors propagate verbatim
-* streaming remains streaming
-* no convenience shortcuts
-
-If MCP behavior differs from library behavior, that is a bug.
+Never auto-execute tools inside `desid` or `libdesi`
 
 ---
 
@@ -353,20 +399,20 @@ If MCP behavior differs from library behavior, that is a bug.
 
 Before adding code, ask:
 
-1. Is this protocol-required or required for correctness
-2. Can it be expressed as a thin helper without adding hidden behavior
+1. Is this required for correctness or protocol compliance
+2. Can it be expressed as a thin helper without hidden behavior
 3. Does it preserve zero-DOM parsing
 4. Does it avoid hidden allocation
 5. Does it preserve layer boundaries
 6. Can it be tested deterministically
 
-If the answer to any is “no”, stop.
+If the answer to any is “no”, stop
 
 ---
 
 ## Testing Requirements
 
-All new code must have tests in `tests/llmctl.c` or a new test file.
+All new code must have tests
 
 Tests must:
 
@@ -375,8 +421,9 @@ Tests must:
 * cover streaming and non-stream paths
 * validate tool behavior explicitly
 * cover failure modes and error codes
+* exercise hard limits and hostile inputs
 
-Never test by string comparison alone.
+Never test by string comparison alone
 
 ---
 
@@ -385,11 +432,11 @@ Never test by string comparison alone.
 Recommended workflow:
 
 * dump raw HTTP responses (headers + body length)
-* dump SSE frames before parsing
+* dump SSE frames before higher-level parsing
 * log token arrays with indices
 * assert token spans visually
 
-Avoid printf-debugging inside tight loops.
+Avoid printf-debugging inside tight loops
 
 ---
 
@@ -401,16 +448,17 @@ Avoid printf-debugging inside tight loops.
 * minimal preprocessor usage
 * comments explain why, not what
 
-If a comment explains what the code does, delete it.
+If a comment explains what the code does, delete it
 
 ---
 
 ## Final Rule
 
-If you are unsure whether something belongs in `desi`, it probably does not.
+If you are unsure whether something belongs in `libdesi`, it probably does not
 
-Keep it small  
-Keep it strict  
-Keep it boring  
+Keep libdesi small  
+Keep desid boring  
+Keep agentd explicit  
+Keep mcpd deterministic  
 
 That is the point

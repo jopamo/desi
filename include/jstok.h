@@ -158,14 +158,16 @@ JSTOK_API int jstok_unescape(const char* json, const jstoktok_t* t, char* out, s
  */
 JSTOK_API int jstok_path(const char* json, const jstoktok_t* toks, int count, int root, ...);
 
+typedef enum { JSTOK_SSE_EOF = 0, JSTOK_SSE_DATA = 1, JSTOK_SSE_NEED_MORE = -1 } jstok_sse_res;
+
 /*
  * SSE Line Parser.
  * Scans 'buf' starting at '*pos' for the next "data:" line.
  * - Updates '*pos' to the start of the next line.
  * - Sets 'out' to the span of the payload (excluding "data: " and newline).
- * - Returns 1 if a data line was found, 0 if need more data or EOF.
+ * - Returns JSTOK_SSE_DATA if found, JSTOK_SSE_NEED_MORE if incomplete or EOF.
  */
-JSTOK_API int jstok_sse_next(const char* buf, int len, int* pos, jstok_span_t* out);
+JSTOK_API jstok_sse_res jstok_sse_next(const char* buf, size_t len, size_t* pos, jstok_span_t* out);
 
 #endif /* JSTOK_NO_HELPERS */
 
@@ -179,6 +181,8 @@ JSTOK_API int jstok_sse_next(const char* buf, int len, int* pos, jstok_span_t* o
 /* Implementation                                                             */
 /* -------------------------------------------------------------------------- */
 #ifndef JSTOK_HEADER
+
+#include <string.h>
 
 /* Minimal helpers, avoid heavy deps */
 static int jstok_is_space(char c) { return (c == ' ' || c == '\t' || c == '\n' || c == '\r'); }
@@ -1114,75 +1118,51 @@ JSTOK_API int jstok_path(const char* json, const jstoktok_t* toks, int count, in
     return curr;
 }
 
-static int jstok_str_prefix(const char* str, int len, const char* prefix) {
-    int i = 0;
-    while (prefix[i] != '\0') {
-        if (i >= len || str[i] != prefix[i]) return 0;
-        i++;
-    }
-    return i; /* Return length of prefix */
-}
+JSTOK_API jstok_sse_res jstok_sse_next(const char* buf, size_t len, size_t* pos, jstok_span_t* out) {
+    if (*pos > len) *pos = len;
+    size_t cur = *pos;
+    if (cur >= len) return JSTOK_SSE_NEED_MORE;
 
-JSTOK_API int jstok_sse_next(const char* buf, int len, int* pos, jstok_span_t* out) {
-    int start = *pos;
-    int i = start;
-    int line_len;
-    int prefix_len;
+    while (cur < len) {
+        size_t line_start = cur;
+        const char* p_newline = (const char*)memchr(buf + cur, '\n', len - cur);
 
-    /* Scan for newline */
-    while (i < len && buf[i] != '\n') i++;
-
-    if (i >= len) {
-        /* Line not complete */
-        return 0;
-    }
-
-    /* Check for \r before \n */
-    line_len = i - start;
-    if (line_len > 0 && buf[start + line_len - 1] == '\r') {
-        line_len--;
-    }
-
-    /* Advance position for next call (skip \n) */
-    *pos = i + 1;
-
-    /* Skip empty lines */
-    if (line_len == 0) {
-        /* Recursively look for next valid line, or return 0 if end of block?
-           Better to return 0 but update pos so caller loops.
-           Actually, let's loop internally to find the next DATA line. */
-        return jstok_sse_next(buf, len, pos, out);
-    }
-
-    /* Check for "data:" prefix */
-    prefix_len = jstok_str_prefix(buf + start, line_len, "data:");
-    if (prefix_len > 0) {
-        /* Found data line */
-        const char* payload = buf + start + prefix_len;
-        int payload_len = line_len - prefix_len;
-
-        /* Skip leading space if present ("data: " vs "data:") */
-        if (payload_len > 0 && payload[0] == ' ') {
-            payload++;
-            payload_len--;
+        if (!p_newline) {
+            *pos = line_start;
+            return JSTOK_SSE_NEED_MORE;
         }
 
-        /* Check for [DONE] */
-        if (payload_len == 6 && payload[0] == '[' && payload[1] == 'D' && payload[2] == 'O' && payload[3] == 'N' &&
-            payload[4] == 'E' && payload[5] == ']') {
-            /* Return strict empty span to signal done, or let caller handle string check?
-               Let's return the span, caller checks [DONE]. */
+        size_t next_line_start = (size_t)(p_newline - buf) + 1;
+        size_t line_len = next_line_start - line_start - 1;
+
+        if (line_len > 0 && buf[line_start + line_len - 1] == '\r') {
+            line_len--;
         }
 
-        if (out) {
-            out->p = payload;
-            out->n = (size_t)payload_len;
+        int is_data = 0;
+        if (line_len >= 5 && memcmp(buf + line_start, "data:", 5) == 0) {
+            is_data = 1;
         }
-        return 1;
+
+        if (is_data) {
+            size_t payload_off = 5;
+            if (payload_off < line_len && buf[line_start + payload_off] == ' ') {
+                payload_off++;
+            }
+
+            if (out) {
+                out->p = buf + line_start + payload_off;
+                out->n = line_len - payload_off;
+            }
+            *pos = next_line_start;
+            return JSTOK_SSE_DATA;
+        }
+
+        cur = next_line_start;
+        *pos = cur;
     }
 
-    /* Found a line, but it wasn't "data:" (e.g. "event:" or comment), skip it */
-    return jstok_sse_next(buf, len, pos, out);
+    return JSTOK_SSE_NEED_MORE;
 }
 
 #endif /* JSTOK_NO_HELPERS */

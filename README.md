@@ -2,128 +2,149 @@
   <img src=".github/desi.png" alt="desi logo" width="300" style="display:block; margin:0;">
 </div>
 
-A **minimal, deterministic C client for LLM APIs**, built directly on top of **`jstok`**.
+`desi` is a **deterministic C LLM gateway + LAN orchestration suite**, built on **`jstok`** and a strict **SSE-first** streaming model.
 
-`desi` is designed for **systems programmers** who want full control over parsing, streaming, and protocol behavior without pulling in a JSON DOM, a scripting runtime, or a heavyweight SDK.
+It is designed for systems programmers who want:
 
-It also ships as an **MCP server**, exposing the same core engine to agent runtimes and external tooling.
+* predictable parsing (no JSON DOM)
+* explicit protocol state machines
+* mechanically bounded streaming
+* simple, inspectable daemons that compose over HTTP
+
+`desi` is one repository that ships:
+
+* **`libdesi`**: strict HTTP(S) client + SSE framing + zero-DOM JSON + LLM protocol bindings
+* **`desid`**: HTTP gateway to LLM backends (**the only service allowed to talk to LLMs**)
+* **`agentd`**: LAN orchestrator (runs, step loops, tool coordination, run event stream)
+* **`mcpd`**: HTTP tool servers (Wikipedia, internal APIs, registries, etc)
 
 ---
 
 ## Where `desi` Fits
 
-`desi` is the **boring, correct transport + protocol binding** layer in a larger stack.
+`desi` is the “boring correctness” layer and the minimal LAN control plane that sits near inference.
+
+Long-term:
 
 ```
 
 ET (identity, authorization, audit, policy)
-└── uses desi for outbound HTTP(S) calls
-├── llama-server (stateless inference appliance)
-├── registries
-├── internal APIs
-└── MCP servers
-
-desi = HTTP(S) client + SSE framing + zero-DOM JSON + protocol semantics
+└── fronts agentd/desid
+├── agentd (runs + tool loops)
+├── desid  (LLM gateway)
+└── mcpd-* (tool servers)
+|
+└── libdesi (transport + SSE + jstok parsing)
 
 ```
 
-`desi` participates in **authentication** (TLS verification, optional mTLS via explicit configuration) and never **authorization**.
+Phase 1 (no auth, LAN-only):
 
-* ET decides who is allowed and what is permitted
-* desi ensures bytes, parsing, and protocol semantics are correct and explicit
-* llama-server generates tokens and nothing else
+```
+
+LAN clients ──HTTP──> agentd
+├──HTTP──> desid ──HTTP──> llama-server / other LLM backends
+└──HTTP──> mcpd-* ──HTTP──> external/internal APIs
+
+```
+
+**Hard invariant:** only `desid` reaches LLM backends. Everyone else talks to `desid`.
 
 ---
 
 ## Goals
 
-* **Zero JSON DOM**  
-  Uses `jstok` strictly as a tokenizer + validator
+### Suite goals
 
-* **Streaming-first**  
-  Native SSE handling with incremental parsing
+* **HTTP-first**
+  Everything composes over HTTP on a LAN
 
-* **Tool-call correct**  
-  Fully supports fragmented tool arguments in streams
+* **Streaming-first**
+  SSE is the primitive for progress, deltas, and long-lived flows
 
-* **Protocol honest**  
-  Matches real OpenAI-style semantics validated by `llm_power`
+* **Deterministic orchestration**
+  `agentd` runs explicit, bounded state machines with observable steps
 
-* **Embeddable**  
-  No global state, no background threads, no hidden allocs
+* **No hidden behavior**
+  No magic retries, no implicit caching, no background scheduler threads
 
-* **Dual use**  
-  Works as:
-  * a C library
-  * a standalone MCP server
+### `libdesi` goals
 
-* **Mechanically bounded**  
-  Explicit limits for request/response/stream buffers and tool args
+* **Zero JSON DOM**
+  `jstok` tokenization + validation + span extraction only
+
+* **Protocol honest**
+  Explicit state machines for LLM semantics and streaming behavior
+
+* **Mechanically bounded**
+  Hard limits for request/response/stream buffers and tool argument assembly
+
+* **Embeddable**
+  No global state, no hidden allocators, no background threads
 
 ---
 
 ## Non-goals
 
+### Across the suite
+
+* No authorization decisions (ET or callers own policy)
+* No “agent intelligence” baked into tool servers
+* No silent retries or inference of intent
+
+### `libdesi` specifically
+
 * No generic JSON object model
-* No opinionated retry or policy engine
-* No automatic message inference
-* No orchestration, scheduling, or caching
-* No transport magic beyond HTTP contracts
-* No authorization decisions
+* No orchestration framework
+* No caching layer
+* No scheduling engine
+
+If you need those, they belong in `agentd` or ET, not in the library core.
 
 ---
 
 ## Architecture Overview
 
+### Component view
+
 ```
 
-┌──────────────┐
-│ Application  │
-└──────┬───────┘
+┌─────────────┐     HTTP      ┌─────────────┐     HTTP      ┌──────────────┐
+│  LAN client  │ ───────────> │   agentd    │ ───────────> │    desid      │
+└─────────────┘    (SSE)      └─────────────┘    (SSE)      └──────┬───────┘
+│                                   │
+│ HTTP                               │ HTTP
+v                                   v
+┌──────────┐                        ┌────────────┐
+│  mcpd-*  │                        │ llama-server│
+└────┬─────┘                        └────────────┘
 │
-┌──────▼────────┐
-│ desi public   │
-│ API (llm.h)   │
-└──────┬────────┘
+v
+external APIs
+
+All outbound HTTP client behavior comes from libdesi
+
+```
+
+### Library layering (inside libdesi)
+
+```
+
+┌───────────────────────────┐
+│ Protocol bindings         │  chat / tools / streaming semantics
+└───────────┬───────────────┘
 │
-├───────────────────────────┐
-│ Protocol Semantics Layer  │
-│                           │
-│ • chat / completions      │
-│ • streaming orchestration │
-│ • tool loop runner        │
-│ • response_format         │
-│ • finish_reason rules     │
-└──────┬────────────────────┘
+┌───────────▼───────────────┐
+│ JSON read/write           │  tiny writer + jstok extractors, spans only
+└───────────┬───────────────┘
 │
-├───────────────────────────┐
-│ JSON read/write           │
-│                           │
-│ • tiny JSON writer        │
-│ • jstok-based extractors  │
-│ • span-based results      │
-└──────┬────────────────────┘
+┌───────────▼───────────────┐
+│ SSE core                  │  framing + event parsing, no semantics
+└───────────┬───────────────┘
 │
-├───────────────────────────┐
-│ Streaming (SSE)           │
-│                           │
-│ • incremental buffering   │
-│ • jstok_sse_next()        │
-│ • delta + tool assembly   │
-│ • [DONE] termination      │
-└──────┬────────────────────┘
-│
-├───────────────────────────┐
-│ Transport                 │
-│                           │
-│ • pluggable vtable        │
-│ • libcurl backend         │
-│ • TLS verify + mTLS       │
-└──────┬────────────────────┘
-│
-┌──────▼────────┐
-│ Remote server │
-└───────────────┘
+┌───────────▼───────────────┐
+│ Transport                 │  HTTP(S) byte pump + TLS/mTLS plumbing
+└───────────────────────────┘
 
 ```
 
@@ -131,10 +152,38 @@ Layer rules:
 
 * transport is a byte pump
 * SSE does framing only
-* JSON does tokenization and extraction only
+* JSON does tokenization/extraction only
 * protocol owns semantics and validation
 
 No layer mutates data owned by another layer.
+
+---
+
+## SSE Compliance
+
+`desi` treats SSE as a real protocol with strict parsing rules:
+
+* UTF-8 decode; strip exactly one leading BOM if present
+* line endings may be CRLF, LF, or CR
+* `data:` appends value + LF to the data buffer
+* blank line dispatches one event and resets data/event-type buffers
+* `id:` updates last-event-id (unless it contains NUL)
+* `retry:` updates reconnection time when digits-only
+* comment lines starting with `:` are ignored
+
+SSE parsing is framing only; higher layers decide what `data` means.
+
+---
+
+## Tool Servers (`mcpd-*`)
+
+Tool servers are standalone daemons that expose explicit capabilities over HTTP.
+
+* tools never talk to LLMs
+* tool outputs are opaque data to callers
+* tool execution is always caller-controlled and bounded by `agentd`
+
+Each `mcpd-*` is expected to be deterministic, size-bounded, and hostile-input safe.
 
 ---
 
@@ -142,162 +191,40 @@ No layer mutates data owned by another layer.
 
 ```
 
-include/llm/
-llm.h                 public API
+include/
+desi/                 public headers (libdesi)
 
 src/
-llm_transport_curl.c  HTTP backend
-llm_json_write.c      minimal JSON writer
-llm_json_read.c       jstok-based extractors
-llm_sse.c             streaming + SSE framing
-llm_chat.c
-llm_completions.c
-llm_tools.c
-mcp_server.c          MCP server implementation
+lib/                  libdesi core
+desi_transport_*.c
+desi_json_write.c
+desi_json_read.c
+desi_sse.c
+desi_chat.c
+desi_tools.c
+
+desid/                 LLM gateway daemon (HTTP server)
+agentd/                orchestration daemon (HTTP + SSE server)
+mcpd/                  tool server framework + built-in tools
+wikipedia/
+...
 
 third_party/
-jstok.h               vendored tokenizer
+jstok/                 vendored tokenizer
 
 tests/
-llmctl.c              mirrors llm_power expectations
+libdesi_*.c            transport/SSE/JSON/protocol tests
+agentd_*.c             run-state-machine and limits tests
+mcpd_*.c               tool behavior + hostile input tests
+
+examples/
+client_llm.c
+client_sse.c
+client_agentd.c
 
 ````
 
----
-
-## jstok Integration Contract
-
-`jstok` is used only for:
-
-* Tokenizing response JSON
-* Extracting fields via paths
-* Validating JSON fragments
-* Scanning SSE `data:` frames
-
-It is not used for:
-
-* Request construction
-* Object ownership
-* Protocol logic
-* Schema enforcement beyond local validation
-* Caching or memoization
-
-This keeps parsing predictable and allocation-free.
-
----
-
-## Memory and Ownership Model
-
-`desi` is span-first.
-
-* response JSON buffers are owned by the transport
-* all extracted values are spans into those buffers
-* copying is explicit and opt-in
-* no hidden allocation in extraction helpers
-
-Streaming buffers:
-
-* are owned by per-request stream state
-* are bounded and compacted
-* must remain stable across partial reads
-
-If a function allocates, it must be obvious from the API.
-
----
-
-## Error Model
-
-Errors are values, not logs.
-
-* public APIs return error codes
-* errors identify the failing stage (transport, SSE framing, parse, protocol)
-* partial success is not allowed unless explicitly designed
-* server incorrectness is treated as a normal error path
-
-`desi` does not hide failures.
-
----
-
-## Streaming Model
-
-* Transport delivers arbitrary byte chunks
-* `llm_sse.c` maintains a rolling buffer
-* `jstok_sse_next()` yields complete `data:` payloads
-* Each payload is parsed independently
-* Tool-call argument fragments are accumulated per call index
-* `[DONE]` cleanly terminates the stream
-
-Fragmented tool arguments are reassembled exactly as sent.
-
----
-
-## Tool Call Semantics
-
-`desi` implements the modern tool protocol:
-
-* Multiple tool calls per turn
-* Fragmented streaming arguments
-* Stable call indexing
-* Optional `id` handling
-* Deterministic loop execution
-* Explicit caller-controlled tool execution
-
-Tool execution is never implicit.
-
----
-
-## response_format Support
-
-Supported request formats:
-
-* `json_object`
-* `json_schema`
-
-Validation behavior:
-
-* returned content is re-parsed with `jstok`
-* invalid JSON is rejected immediately
-* any additional shape checks must be explicit and bounded
-
-`desi` treats response_format promises as untrusted until validated.
-
----
-
-## TLS and mTLS
-
-Defaults:
-
-* TLS verification on
-* system trust store by default
-* hostname verification on
-
-Optional:
-
-* mTLS via explicit client cert + key configuration
-
-`desi` does not decide who is authorized.
-
-It only ensures the cryptographic session is correct per configuration.
-
----
-
-## MCP Server Mode
-
-`desi` can run as an MCP server, exposing:
-
-* chat
-* streaming chat
-* tool loop coordination
-* structured JSON responses
-
-The MCP server:
-
-* uses the same core engine
-* adds no extra parsing layers
-* maps errors directly
-* preserves streaming semantics
-
-If MCP behavior differs from library behavior, that is a bug.
+(Exact filenames may vary, but the boundary is fixed: lib core vs daemons.)
 
 ---
 
@@ -313,30 +240,18 @@ meson compile -C build
 ## Testing
 
 ```sh
-./build/tests/llmctl
+meson test -C build
 ```
 
 All tests validate behavior by:
 
-* parsing responses with `jstok`
-* asserting extracted fields and spans
-* verifying streaming and tool correctness
-* exercising failure paths and limits
-
----
-
-## Examples
-
-See `examples/` for:
-
-* non-stream chat
-* streaming SSE
-* tool loop execution
-* MCP server invocation
+* parsing with `jstok`
+* asserting spans and typed extracts
+* exercising streaming and reconnection behavior
+* covering failure paths and hard limits
 
 ---
 
 ## License
 
 MIT
-
